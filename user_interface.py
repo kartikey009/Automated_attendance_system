@@ -16,10 +16,28 @@ from PySide6.QtWidgets import (
     QPushButton, QLineEdit, QFileDialog, QMessageBox, QListWidget, QTextEdit,
     QGroupBox, QGridLayout, QProgressBar
 )
+from PySide6.QtWidgets import QToolBar
 from PySide6.QtGui import QPixmap, QImage
 from PySide6.QtCore import Qt, Signal, QObject, QTimer
 import numpy as _np
 import cv2
+
+
+# A simple dark stylesheet used to give the UI a modern, compact appearance.
+DARK_STYLESHEET = """
+QWidget { background: #151515; color: #e6e6e6; font-family: Segoe UI, Arial, Sans-serif; }
+QGroupBox { border: 1px solid #333; margin-top: 8px; padding: 8px; background: #171717; }
+QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 4px 6px; color: #f2f2f2; }
+QPushButton { background: #2d2d2d; border: 1px solid #3b3b3b; padding: 6px 10px; border-radius: 4px; color: #eaeaea; }
+QPushButton:hover { background: #3b3b3b; }
+QLineEdit { background: #121212; border: 1px solid #2b2b2b; padding: 6px; color: #f5f5f5; }
+QTextEdit, QListWidget { background: #0f0f0f; border: 1px solid #262626; color: #e6e6e6; }
+QLabel { color: #dddddd; }
+QToolBar { background: #1e1e1e; border: none; padding: 4px; }
+QToolButton { background: transparent; color: #e0e0e0; padding: 6px 8px; }
+QToolButton:hover { background: #2a2a2a; }
+QStatusBar { background: #151515; border-top: 1px solid #252525; }
+"""
 
 # import backend modules
 import final_software_opencv as final
@@ -93,9 +111,13 @@ class Worker(threading.Thread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Attendance System (Buffalo+YOLOv8)")
+        self.setWindowTitle("Attendance System — Buffalo + YOLOv8")
         self.resize(950, 650)
         self._recog_timer = None
+        # use consistent dark styling across the app
+        self.setStyleSheet(DARK_STYLESHEET)
+        # build app chrome (menu / toolbar / status) before widgets
+        self._create_menu_and_toolbar()
         self._build_ui()
         self.log("UI ready")
 
@@ -103,9 +125,30 @@ class MainWindow(QMainWindow):
         central = QWidget()
         main = QVBoxLayout(central)
 
-        # Header
-        header = QLabel("Automated Attendance — Buffalo_L embeddings + YOLOv8 Face Detector")
-        header.setStyleSheet("font-size:18px; font-weight:600; padding:8px;")
+        # Header (icon + title + subtitle)
+        header_row = QHBoxLayout()
+        icon_lab = QLabel()
+        icon_lab.setFixedSize(48, 48)
+        icon_lab.setText("🛰️")
+        icon_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lab.setStyleSheet('font-size:24px;')
+
+        title_box = QVBoxLayout()
+        title = QLabel("Automated Attendance")
+        title.setStyleSheet("font-size:18px; font-weight:700; color: #ffffff;")
+        subtitle = QLabel("Buffalo_L embeddings + YOLOv8 Face Detector")
+        subtitle.setStyleSheet("font-size:11px; color: #bdbdbd; margin-top:2px;")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        title_box.setContentsMargins(8, 0, 0, 0)
+
+        header_row.addWidget(icon_lab, 0)
+        header_row.addLayout(title_box, 1)
+        header_row.addStretch()
+
+        header = QWidget()
+        header.setLayout(header_row)
+        header.setStyleSheet('padding: 6px 10px 8px 10px;')
         main.addWidget(header)
 
         # Top controls: Dataset / Train / Recognize
@@ -122,14 +165,14 @@ class MainWindow(QMainWindow):
         self.inp_ds_name = QLineEdit("person1")
         gbox.addWidget(self.inp_ds_name, 1, 1)
 
-        btn_create = QPushButton("Create Dataset (Burst)")
+        btn_create = QPushButton("Create Dataset")
         btn_create.clicked.connect(self.create_dataset)
         gbox.addWidget(btn_create, 1, 2)
 
         gbox.addWidget(QLabel("Dataset Root for Training:"), 2, 0)
         self.inp_train_root = QLineEdit(os.path.join(os.getcwd(), "output"))
         gbox.addWidget(self.inp_train_root, 2, 1)
-        btn_train = QPushButton("Train (compute Buffalo embeddings)")
+        btn_train = QPushButton("Train — Compute embeddings")
         btn_train.clicked.connect(self.start_train)
         gbox.addWidget(btn_train, 2, 2)
 
@@ -159,7 +202,9 @@ class MainWindow(QMainWindow):
         cam_v.addWidget(self.lbl_camera)
         # Controls below camera
         cam_controls = QHBoxLayout()
-        self.btn_start_rec = QPushButton("Start Recognition (embedded)")
+        cam_controls.setSpacing(8)
+        cam_controls.setContentsMargins(4, 6, 4, 6)
+        self.btn_start_rec = QPushButton("Start Recognition")
         self.btn_start_rec.clicked.connect(self.start_recognition)
         self.btn_stop_rec = QPushButton("Stop Recognition")
         self.btn_stop_rec.clicked.connect(self.stop_recognition)
@@ -195,8 +240,8 @@ class MainWindow(QMainWindow):
         main.addLayout(mid)
 
         # Footer
-        footer = QLabel("Keys during recognition: m = manual mark, q = quit, c = clear today's attendance, s = snapshot")
-        footer.setStyleSheet("color: gray;")
+        footer = QLabel("Keys during recognition: m = mark, q = quit, c = clear today, s = snapshot")
+        footer.setStyleSheet("color: #9a9a9a; font-size:11px; padding:8px 4px 6px 4px;")
         main.addWidget(footer)
 
         self.setCentralWidget(central)
@@ -373,6 +418,32 @@ class MainWindow(QMainWindow):
         except Exception:
             traceback.print_exc()
         self._recog_worker.start()
+
+    def _create_menu_and_toolbar(self):
+        # Menu bar
+        menubar = self.menuBar()
+        file_menu = menubar.addMenu("File")
+        help_menu = menubar.addMenu("Help")
+
+        exit_act = file_menu.addAction("Exit")
+        exit_act.triggered.connect(self.close)
+
+        about_act = help_menu.addAction("About")
+        about_act.triggered.connect(self._show_about)
+
+        # Toolbar
+        tb = QToolBar("Main")
+        tb.setMovable(False)
+        tb.addAction(exit_act)
+        tb.addAction(about_act)
+        self.addToolBar(tb)
+
+        # Status bar
+        st = self.statusBar()
+        st.showMessage("Ready — local environment")
+
+    def _show_about(self):
+        QMessageBox.information(self, "About", "Automated Attendance\nUI — polished with PySide6\nRun using your virtual environment")
 
     def _on_recog_done(self, result, exc):
         # stop live refresh timer
