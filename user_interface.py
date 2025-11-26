@@ -204,6 +204,11 @@ class MainWindow(QMainWindow):
         cam_controls = QHBoxLayout()
         cam_controls.setSpacing(8)
         cam_controls.setContentsMargins(4, 6, 4, 6)
+        # Camera controls: preview + recognition
+        self.btn_preview = QPushButton("Preview Camera")
+        self.btn_preview.setCheckable(True)
+        self.btn_preview.clicked.connect(self.toggle_preview)
+
         self.btn_start_rec = QPushButton("Start Recognition")
         self.btn_start_rec.clicked.connect(self.start_recognition)
         self.btn_stop_rec = QPushButton("Stop Recognition")
@@ -212,6 +217,7 @@ class MainWindow(QMainWindow):
         self.btn_mark_current = QPushButton("Mark Current")
         self.btn_mark_current.clicked.connect(self._mark_current)
         cam_controls.addWidget(self.btn_start_rec)
+        cam_controls.addWidget(self.btn_preview)
         cam_controls.addWidget(self.btn_stop_rec)
         cam_controls.addWidget(self.btn_mark_current)
         cam_v.addLayout(cam_controls)
@@ -253,6 +259,9 @@ class MainWindow(QMainWindow):
         self._recog_worker = None
         self._recog_running = False
         self._recog_current_names = set()
+        # preview state (separate from recognition)
+        self._preview_worker = None
+        self._preview_running = False
 
     def browse_dataset_root(self):
         d = QFileDialog.getExistingDirectory(self, "Select dataset root", self.inp_ds_out.text())
@@ -404,6 +413,13 @@ class MainWindow(QMainWindow):
         names = list(embeddings_dict.keys())
         emb_matrix = _np.vstack([embeddings_dict[n] for n in names]).astype(_np.float32)
 
+        # If preview is running, stop it so recognition can own the camera
+        if getattr(self, '_preview_running', False):
+            try:
+                self.stop_preview()
+            except Exception:
+                pass
+
         # start worker
         self._recog_running = True
         self.btn_stop_rec.setEnabled(True)
@@ -418,6 +434,85 @@ class MainWindow(QMainWindow):
         except Exception:
             traceback.print_exc()
         self._recog_worker.start()
+
+    # --- Camera preview helpers -------------------------------------------------
+    def toggle_preview(self, checked: bool):
+        """Toggle the camera preview without running recognition."""
+        if checked:
+            self.start_preview()
+        else:
+            self.stop_preview()
+
+    def start_preview(self):
+        if getattr(self, '_preview_running', False):
+            return
+        self._preview_running = True
+        # disable starting recognition while preview is active to avoid camera conflicts
+        try:
+            self.btn_start_rec.setEnabled(False)
+        except Exception:
+            pass
+        # launch preview worker
+        self._preview_worker = Worker(self._preview_loop, args=(self.inp_res.text().strip(),), on_done=self._on_preview_done)
+        self._preview_worker.start()
+
+    def stop_preview(self):
+        if not getattr(self, '_preview_running', False):
+            return
+        try:
+            # signal worker to stop — Worker threads check _stop_request attr
+            if self._preview_worker:
+                self._preview_worker._stop_request = True
+        except Exception:
+            pass
+
+    def _on_preview_done(self, result, exc):
+        # Called when preview worker ends; clear state and re-enable recognition button
+        self._preview_running = False
+        try:
+            self.btn_preview.setChecked(False)
+            self.btn_start_rec.setEnabled(True)
+            # clear camera image if preview stopped and recognition not running
+            if not getattr(self, '_recog_running', False):
+                self.lbl_camera.clear()
+                self.lbl_camera.setStyleSheet("background: #222; border: 1px solid #444;")
+        except Exception:
+            traceback.print_exc()
+
+    def _preview_loop(self, resolution):
+        """Background preview capture loop: reads frames and sends them to _display_frame.
+        This does not run detection/recognition and will run until _stop_request is set."""
+        try:
+            cap = cv2.VideoCapture(0)
+            if not cap or not cap.isOpened():
+                self.log("Cannot open camera for preview")
+                return ""
+            if resolution:
+                try:
+                    wres, hres = tuple(map(int, resolution.split('x')))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, wres)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, hres)
+                except Exception:
+                    pass
+
+            while True:
+                if getattr(threading.current_thread(), '_stop_request', False):
+                    break
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    continue
+                try:
+                    _INVOKER.call.emit(self._display_frame, (frame.copy(), []))
+                except Exception:
+                    pass
+                # small yield
+                cv2.waitKey(1)
+
+            cap.release()
+            return ""
+        except Exception:
+            traceback.print_exc()
+            return ""
 
     def _create_menu_and_toolbar(self):
         # Menu bar
