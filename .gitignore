@@ -1,0 +1,54 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+.eggs/
+*.egg-info/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg
+
+# Virtual environments
+venv/
+venv*/
+.venv/
+env/
+ENV/
+env.bak/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Model and large data files
+models/
+*.onnx
+*.pt
+*.pth
+*.ckpt*
+
+# Output and captures
+captures/
+output/
+
+# CSV attendance outputs (optional)
+attendance/*.csv
