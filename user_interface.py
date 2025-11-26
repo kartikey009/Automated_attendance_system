@@ -1,537 +1,535 @@
-import tkinter as tk
-from tkinter import *
-import tkinter
-from tkinter import filedialog
-from tkinter import ttk, StringVar, IntVar
-from PIL import ImageTk, Image
-from tkinter import messagebox
-from PIL import Image
-import final_sotware
-import xlwt
-from xlwt import Workbook
+# user_interface.py
+"""
+PyQt6 modern UI for the Attendance System.
+Wires to final_software_opencv.dataset_creation, train, recognize.
+"""
+
+import sys
+import os
+import threading
+import pickle
+import traceback
+from datetime import datetime
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QLineEdit, QFileDialog, QMessageBox, QListWidget, QTextEdit,
+    QGroupBox, QGridLayout, QProgressBar
+)
+from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
+import numpy as _np
+import cv2
+
+# import backend modules
+import final_software_opencv as final
+import attendance
+import face_detect
+
+# Simple worker thread wrapper using threading.Thread
+class _Invoker(QObject):
+    """Helper QObject that invokes a Python callable in the QObject's thread
+    by emitting a signal from other threads. This ensures UI callbacks are
+    executed on the main (Qt) thread."""
+    call = pyqtSignal(object, object)
+
+    def __init__(self):
+        super().__init__()
+        self.call.connect(self._on_call)
+
+    def _on_call(self, cb, args):
+        try:
+            cb(*args)
+        except Exception:
+            traceback.print_exc()
 
 
-def s_exit():
-    exit(0)
+# create a single invoker instance tied to the main thread
+_INVOKER = _Invoker()
 
 
-def putwindow():
+class Worker(threading.Thread):
+    def __init__(self, fn, args=(), on_done=None):
+        super().__init__()
+        self.fn = fn
+        self.args = args
+        self.on_done = on_done
+        self.result = None
+        self.exc = None
 
-    window = Tk()
-    window.geometry("800x500")
-    #window.configure(background='')
-    window.title("Attendance System")
-    #window.geometry("800x500")
-    tkinter.Label(window, text = "^^ WELCOME TO FACE DETECTION AND RECOGNITION SOFTWARE ^^", fg = "black", bg = "darkorange").pack(fill = "x")
-    tkinter.Label(window, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg = 'orange').pack(fill = 'x')
-    tkinter.Label(window, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg = 'orange').pack(fill = 'x')
+    def run(self):
+        try:
+            self.result = self.fn(*self.args)
+        except Exception as e:
+            self.exc = e
+            traceback.print_exc()
+        finally:
+            if self.on_done:
+                try:
+                    # If on main thread, call directly; otherwise schedule via Qt invoker
+                    if threading.current_thread() is threading.main_thread():
+                        self.on_done(self.result, self.exc)
+                    else:
+                        # If no Qt event loop / QApplication exists (e.g. running headless tests),
+                        # call the callback directly to avoid losing the result. When a
+                        # QApplication exists, schedule the callback on the Qt/main thread
+                        # via our invoker so UI work happens on the correct thread.
+                        try:
+                            from PyQt6.QtWidgets import QApplication
+                            if QApplication.instance() is None:
+                                # no Qt app: call directly
+                                self.on_done(self.result, self.exc)
+                            else:
+                                _INVOKER.call.emit(self.on_done, (self.result, self.exc))
+                        except Exception:
+                            # fallback: direct call
+                            try:
+                                self.on_done(self.result, self.exc)
+                            except Exception:
+                                traceback.print_exc()
+                except Exception:
+                    traceback.print_exc()
 
-    tkinter.Label(window, text = "GUIDELINES TO USE THIS SOFTWARE", fg = "black", bg = "salmon1").pack(fill = "x")
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Attendance System (Buffalo+YOLOv8)")
+        self.resize(950, 650)
+        self._recog_timer = None
+        self._build_ui()
+        self.log("UI ready")
 
-    tkinter.Label(window, text = " ").pack(fill = 'y')
+    def _build_ui(self):
+        central = QWidget()
+        main = QVBoxLayout(central)
 
-    tkinter.Label(window, text = ": \n\n"
-                                 "This software allows user to:\n\n"
-                                 "1) CREATE DATASET using MTCNN face detection and alignment\n"
-                                 "2) TRAIN FaceNet for face recognition                     \n"
-                                 "3) Do both                                                \n\n\n "
-                                                   , fg = "black", bg = "aquamarine").pack(fill = "y")
+        # Header
+        header = QLabel("Automated Attendance — Buffalo_L embeddings + YOLOv8 Face Detector")
+        header.setStyleSheet("font-size:18px; font-weight:600; padding:8px;")
+        main.addWidget(header)
 
-    tkinter.Label(window, text = "\n\n").pack(fill = 'y')
+        # Top controls: Dataset / Train / Recognize
+        group = QGroupBox("Actions")
+        gbox = QGridLayout(group)
+        gbox.addWidget(QLabel("Dataset Output Root:"), 0, 0)
+        self.inp_ds_out = QLineEdit(os.path.join(os.getcwd(), "output"))
+        gbox.addWidget(self.inp_ds_out, 0, 1)
+        btn_ds_browse = QPushButton("Browse")
+        btn_ds_browse.clicked.connect(self.browse_dataset_root)
+        gbox.addWidget(btn_ds_browse, 0, 2)
 
+        gbox.addWidget(QLabel("Username (for dataset):"), 1, 0)
+        self.inp_ds_name = QLineEdit("person1")
+        gbox.addWidget(self.inp_ds_name, 1, 1)
 
-    tkinter.Label(window, text = ": \n\n"
-                                 "The user will multiple times get option to choose webcam (default option) or \n"
-                                 "video file to do face detection and will be asked for output folder, username\n"
-                                 "on folder and image files etc also (default options exists for that too)     \n\n\n "
-                                 "**************   IMPORTANT   *************\n\n"
-                                 "1) Whenever webcam or video starts press 's' keyword to start face detection in video or webcam frames \n"
-                                 "   and save the faces in the folder for a single user. This dataset creation will stop the moment you  \n"
-                                 "   release the 's' key. This can be done multiple times.                                               \n\n"
-                                 "2) Press 'q' to close it when you are done with one person, and want to detect face for another person.\n\n"
-                                 "3) Make sure you press the keywords on the image window and not the terminal window.                   \n"
-                  , fg = "black", bg = "gray").pack(fill = "y")
+        btn_create = QPushButton("Create Dataset (Burst)")
+        btn_create.clicked.connect(self.create_dataset)
+        gbox.addWidget(btn_create, 1, 2)
 
-    def cont_inue():
-        window.destroy()
-        show()
+        gbox.addWidget(QLabel("Dataset Root for Training:"), 2, 0)
+        self.inp_train_root = QLineEdit(os.path.join(os.getcwd(), "output"))
+        gbox.addWidget(self.inp_train_root, 2, 1)
+        btn_train = QPushButton("Train (compute Buffalo embeddings)")
+        btn_train.clicked.connect(self.start_train)
+        gbox.addWidget(btn_train, 2, 2)
 
-    btn1 = tkinter.Button(window, text = "CONTINUE", fg = "black", bg = 'turquoise1', command = cont_inue)
-    btn1.place(x=360, y=450, width=80)
+        gbox.addWidget(QLabel("Classifier filename:"), 3, 0)
+        self.inp_classifier = QLineEdit("classifier_buffalo")
+        gbox.addWidget(self.inp_classifier, 3, 1)
+        btn_reload = QPushButton("Load Classifier")
+        btn_reload.clicked.connect(self.load_classifier)
+        gbox.addWidget(btn_reload, 3, 2)
 
+        gbox.addWidget(QLabel("Recognition resolution (e.g. 640x480):"), 4, 0)
+        self.inp_res = QLineEdit("640x480")
+        gbox.addWidget(self.inp_res, 4, 1)
 
+        # Recog controls moved into Camera area below (embedded view)
 
+        main.addWidget(group)
+        mid = QHBoxLayout()
+        # Camera display (embedded inside UI)
+        cam_box = QGroupBox("Camera / Recognition")
+        cam_v = QVBoxLayout(cam_box)
+        # camera display QLabel
+        self.lbl_camera = QLabel()
+        self.lbl_camera.setMinimumSize(640, 480)
+        self.lbl_camera.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_camera.setStyleSheet("background: #222; border: 1px solid #444;")
+        cam_v.addWidget(self.lbl_camera)
+        # Controls below camera
+        cam_controls = QHBoxLayout()
+        self.btn_start_rec = QPushButton("Start Recognition (embedded)")
+        self.btn_start_rec.clicked.connect(self.start_recognition)
+        self.btn_stop_rec = QPushButton("Stop Recognition")
+        self.btn_stop_rec.clicked.connect(self.stop_recognition)
+        self.btn_stop_rec.setEnabled(False)
+        self.btn_mark_current = QPushButton("Mark Current")
+        self.btn_mark_current.clicked.connect(self._mark_current)
+        cam_controls.addWidget(self.btn_start_rec)
+        cam_controls.addWidget(self.btn_stop_rec)
+        cam_controls.addWidget(self.btn_mark_current)
+        cam_v.addLayout(cam_controls)
+        mid.addWidget(cam_box, 3)
+        # Logs
+        logs_box = QGroupBox("Logs / Status")
+        logs_layout = QVBoxLayout(logs_box)
+        self.txt_logs = QTextEdit()
+        self.txt_logs.setReadOnly(True)
+        logs_layout.addWidget(self.txt_logs)
+        mid.addWidget(logs_box, 2)
 
-    window.mainloop()
+        # Attendance list
+        att_box = QGroupBox("Today's Attendance")
+        att_layout = QVBoxLayout(att_box)
+        self.lst_att = QListWidget()
+        att_layout.addWidget(self.lst_att)
+        btn_refresh = QPushButton("Refresh")
+        btn_refresh.clicked.connect(self.refresh_attendance)
+        btn_clear = QPushButton("Clear Today")
+        btn_clear.clicked.connect(self.clear_attendance)
+        att_layout.addWidget(btn_refresh)
+        att_layout.addWidget(btn_clear)
+        mid.addWidget(att_box, 1)
 
+        main.addLayout(mid)
 
-def show():
-    #putwindow.window.destroy()
-    window2 = Tk()
-    window2.title("Attendance System")
-    window2.geometry("800x500")
-    tkinter.Label(window2, text = "^^ WELCOME TO FACE DETECTION AND RECOGNITION SOFTWARE ^^", fg="black", bg="darkorange").pack(fill="x")
-    tkinter.Label(window2, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg='orange').pack(fill='x')
-    tkinter.Label(window2, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg='orange').pack(fill='x')
+        # Footer
+        footer = QLabel("Keys during recognition: m = manual mark, q = quit, c = clear today's attendance, s = snapshot")
+        footer.setStyleSheet("color: gray;")
+        main.addWidget(footer)
 
-    #tkinter.Label(window2, text="TEST", fg="lightblue", bg="gray").pack(fill="x")
-    tkinter.Label(window2, text = "\n\n ").pack(fill = 'y')
+        self.setCentralWidget(central)
 
+        # initial refresh
+        self.refresh_attendance()
 
-    tkinter.Label(window2, text = "Click 'TRAIN' to TRAIN and maybe 'TEST later' by making a classifer on the facenet model.\n\n"
-                                  "Click 'TEST' to TEST on previously MTCNN created dataset by loading already created      \n"
-                                  "facenet classification model.                                                            \n\n"
-                                  "Click 'CREATE' to first create dataset and then 'maybe' train later.                     \n\n"
-                                  "Click 'RUN' to TEST by loading a classifier model and using webcam OR user given video   \n"
-                                  "OR given set of images (save option is also available).                                  \n",
-                  fg = 'blue', bg = 'pink').pack(fill = 'y')
+        # recognition state
+        self._recog_worker = None
+        self._recog_running = False
+        self._recog_current_names = set()
 
+    def browse_dataset_root(self):
+        d = QFileDialog.getExistingDirectory(self, "Select dataset root", self.inp_ds_out.text())
+        if d:
+            self.inp_ds_out.setText(d)
 
-    bottom_frame = tkinter.Frame(window2).pack(side = "bottom")
+    def create_dataset(self):
+        out = self.inp_ds_out.text().strip()
+        name = self.inp_ds_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Error", "Please enter a user name")
+            return
+        params = (out, "", "", "", name, "")
+        self.log("Starting dataset creation thread...")
+        w = Worker(final.dataset_creation, args=(params,), on_done=self._on_dataset_done)
+        w.start()
 
-
-
-    def train():
-        print('train')
-        window2.destroy()
-        show_train()
-
-    def test():
-        print('test')
-        window2.destroy()
-        show_test()
-
-    def create():
-        print('create')
-        window2.destroy()
-        show_create()
-
-    def run():
-        print('run')
-        window2.destroy()
-        show_run()
-
-
-    btn1 = tkinter.Button(bottom_frame, text = "TRAIN", fg = "black", bg = 'turquoise1', command = train)
-    btn1.place(x=230, y=350, width=50)
-
-    btn2 = tkinter.Button(bottom_frame, text = "TEST", fg = "black", bg = 'turquoise1', command = test)
-    btn2.place(x=330, y=350, width=50)
-
-    btn3 = tkinter.Button(bottom_frame, text = "CREATE", fg = "black", bg = 'turquoise1', command = create)
-    btn3.place(x=430, y=350, width=50)
-
-    btn3 = tkinter.Button(bottom_frame, text = "RUN", fg = "black", bg = 'turquoise1', command = run)
-    btn3.place(x=530, y=350, width=50)
-
-    btn4 = tkinter.Button(bottom_frame, text = "EXIT", fg = "red", bg = 'indianred1', command = s_exit)
-    btn4.place(x=370, y=450, width=60)
-
-    window2.mainloop()
-
-
-
-def show_run():
-
-    window3 = Tk()
-    #window3.configure(background='lightyellow')
-    window3.title("Attendance System")
-    window3.geometry("1200x800")
-    tkinter.Label(window3, text = "^^ WELCOME TO FACE DETECTION AND RECOGNITION SOFTWARE ^^", fg="black", bg="darkorange").pack(fill="x")
-    tkinter.Label(window3, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg='orange').pack(fill='x')
-    tkinter.Label(window3, text="\n\n ").pack(fill='y')
-
-    #path1 = tk.StringVar()
-
-    tkinter.Label(window3, text = "Enter the path to classifier.pkl").place(x=50, y=50, width=250)
-    path1 = tkinter.Entry(window3)
-    path1.place(x=60, y=70, width=400)
-
-    tkinter.Label(window3, text = "Enter the path to 20180402-114759 FOLDER").place(x=50, y=100, width=300)
-    path2 = tkinter.Entry(window3)
-    path2.place(x=60, y=120, width=400)
-
-    tkinter.Label(window3, text = "Enter desired face width and height for face aligner (WidthxHeight format)").place(x=50, y=150, width=530)
-    face_dim = tkinter.Entry(window3)
-    face_dim.place(x=60, y=170, width=400)
-
-    tkinter.Label(window3, text = "Enter the gpu memory fraction u want to allocate out of 1").place(x=50, y=200, width=420)
-    gpu = tkinter.Entry(window3)
-    gpu.place(x=60, y=220, width=400)
-
-    tkinter.Label(window3, text = "Enter the threshold to consider detection by MTCNN").place(x=50, y=250, width=380)
-    thresh1 = tkinter.Entry(window3)
-    thresh1.place(x=60, y=270, width=400)
-
-    tkinter.Label(window3, text = "Enter the threshold to consider face is recognised").place(x=50, y=300, width=380)
-    thresh2 = tkinter.Entry(window3)
-    thresh2.place(x=60, y=320, width=400)
-
-    tkinter.Label(window3, text="Default values would be assigned to empyt fields", fg="navy", bg="lightblue").place(x=700, y=200, width=380)
-    tkinter.Label(window3, bg = 'orange')
-    #Label.place(y = 350, width = 1400)
-
-    rdbtn1 = IntVar()
-    rdbtn2 = IntVar()
-    rdbtn3 = IntVar()
-
-    rdbi = tkinter.Checkbutton(window3, text="Input: Image", variable = rdbtn3, fg="blue", bg="cyan")
-    rdbi.place(x=60, y=400, width=200)
-
-    #tkinter.Label(window3, text="Input: Image", fg="blue", bg="cyan").place(x=60, y=400, width=200)
-    tkinter.Label(window3, text = "Enter the folder path inside which images are kept").place(x=300, y=400, width=360)
-    img_path = tkinter.Entry(window3)
-    img_path.place(x=300, y=420, width=400)
-
-    tkinter.Label(window3, text = "Enter folder path inside which output images are to be saved").place(x=720, y=400, width=420)
-    out_img_path = tkinter.Entry(window3)
-    out_img_path.place(x=720, y=420, width=400)
-
-    rdbv = tkinter.Checkbutton(window3, text="Input: Video", variable = rdbtn2, fg="blue", bg="cyan")
-    rdbv.place(x=60, y=450, width=200)
-
-    #tkinter.Label(window3, text="Input: Video", fg="blue", bg="cyan").place(x=60, y=450, width=200)
-    tkinter.Label(window3, text = "Enter path to the video file").place(x=300, y=450, width=200)
-    vid_path = tkinter.Entry(window3)
-    vid_path.place(x=300, y=470, width=400)
-
-    tkinter.Label(window3, text = "To Save output video type 'y'").place(x=720, y=450, width=200)
-    vid_save = tkinter.Entry(window3)
-    vid_save.place(x=720, y=470, width=100)
-
-    tkinter.Label(window3, text = "To See output video type y").place(x=950, y=450, width=200)
-    vid_see = tkinter.Entry(window3)
-    vid_see.place(x=960, y=470, width=100)
-
-    rdbw = tkinter.Checkbutton(window3, text="Input: Webcam", variable = rdbtn1, fg="blue", bg="cyan")
-    rdbw.place(x=60, y=500, width=200)
-    tkinter.Label(window3, text = "Enter your supported webcam resolution (eg 640x480)").place(x=300, y=500, width=380)
-    resolution = tkinter.Entry(window3)
-    resolution.place(x=300, y=520, width=400)
-
-    #parameters = path1, path2, face_dim, gpu, thresh1, thresh2, resolution
-
-
-    def submit():
-        print('submit')
-        if rdbtn1.get():
-            print('Webcam')
-            mode = 'w'
-        elif rdbtn2.get():
-            print('Video')
-            mode = 'v'
-        elif rdbtn3.get():
-            print('Image')
-            mode = 'i'
+    def _on_dataset_done(self, result, exc):
+        if exc:
+            self.log("Dataset creation error: " + str(exc))
+            QMessageBox.warning(self, "Dataset", f"Error: {exc}")
         else:
-            print('default')
-            mode = 'w'
+            self.log("Dataset creation finished.")
+            QMessageBox.information(self, "Dataset", "Dataset creation finished.")
 
-        print(mode)
-        parameters = path1.get(), path2.get(), face_dim.get(), gpu.get(), thresh1.get(), thresh2.get(), resolution.get(), \
-                     img_path.get(), out_img_path.get(), vid_path.get(), vid_save.get(), vid_see.get()
-        print(parameters)
-        #mode = 'w'
-        st_name = final_sotware.recognize(mode, parameters)
-        print('students recognised', st_name)
+    def start_train(self):
+        root = self.inp_train_root.text().strip()
+        if not os.path.isdir(root):
+            QMessageBox.warning(self, "Error", "Invalid dataset root")
+            return
+        clf_name = self.inp_classifier.text().strip()
+        params = (root, "", "", "", "", clf_name, "", "")
+        self.log("Starting training thread...")
+        w = Worker(final.train, args=(params,), on_done=self._on_train_done)
+        w.start()
 
-    def mark_attend():
-        if rdbtn1.get():
-            print('Webcam')
-            mode = 'w'
-        elif rdbtn2.get():
-            print('Video')
-            mode = 'v'
-        elif rdbtn3.get():
-            print('Image')
-            mode = 'i'
+    def _on_train_done(self, result, exc):
+        if exc:
+            self.log("Training error: " + str(exc))
+            QMessageBox.warning(self, "Training", f"Error: {exc}")
         else:
-            print('default')
-            mode = 'w'
+            self.log("Training finished.")
+            QMessageBox.information(self, "Training", "Training finished. Load classifier to use recognition.")
 
-        print(mode)
-        parameters = path1.get(), path2.get(), face_dim.get(), gpu.get(), thresh1.get(), thresh2.get(), resolution.get(), \
-                     img_path.get(), out_img_path.get(), vid_path.get(), vid_save.get(), vid_see.get()
-        run_attend(mode, parameters)
+    def load_classifier(self):
+        fname = self.inp_classifier.text().strip()
+        if not fname:
+            fname = "classifier_buffalo"
+        # Accept names with or without .pkl and search some likely locations
+        cand_name = fname if fname.endswith(".pkl") else fname + ".pkl"
+        candidates = []
+        # If user typed an absolute path already, try that first
+        if os.path.isabs(fname):
+            candidates.append(fname)
+        # Common locations to check (in order): as typed, project cwd, train root, dataset output
+        candidates.append(os.path.abspath(cand_name))
+        train_root = self.inp_train_root.text().strip()
+        if train_root:
+            candidates.append(os.path.abspath(os.path.join(train_root, cand_name)))
+        ds_out = self.inp_ds_out.text().strip()
+        if ds_out:
+            candidates.append(os.path.abspath(os.path.join(ds_out, cand_name)))
+        # remove duplicates preserving order
+        seen = set()
+        unique = []
+        for p in candidates:
+            if p and p not in seen:
+                unique.append(p);
+                seen.add(p)
+        found = None
+        for p in unique:
+            if os.path.exists(p):
+                found = p
+                break
+        if not found:
+            QMessageBox.warning(self, "Classifier",
+                                f"Classifier not found. Tried:\n\n" + "\n".join(unique) + "\n\nRun training to create a classifier or select the correct path.")
+            return
+        path = found
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            self.classifier_loaded = path
+            self.log(f"Classifier loaded: {path}  (contains {len(data.get('embeddings', {}))} classes)")
+        except Exception as e:
+            self.log("Load classifier error: " + str(e))
+            QMessageBox.warning(self, "Classifier", f"Error loading classifier: {e}")
 
-    btn9 = tkinter.Button(window3, text = "CONTINUE", fg = "black", bg = 'turquoise1', command = submit)
-    btn9.place(x=550, y=600, width=90)
+    def start_recognition(self):
+        # build params tuple
+        clf = self.inp_classifier.text().strip()
+        if not clf:
+            clf = "classifier_buffalo"
+        params = (clf, "", "", "", "", "", self.inp_res.text().strip(), "", "", "", "", "")
+        # Pre-check classifier exists (allow search in several probable locations)
+        cand_name = clf if clf.endswith('.pkl') else clf + '.pkl'
+        candidates = [os.path.abspath(cand_name)]
+        train_root = self.inp_train_root.text().strip()
+        if train_root:
+            candidates.append(os.path.abspath(os.path.join(train_root, cand_name)))
+        ds_out = self.inp_ds_out.text().strip()
+        if ds_out:
+            candidates.append(os.path.abspath(os.path.join(ds_out, cand_name)))
+        found = None
+        for p in candidates:
+            if os.path.exists(p):
+                found = p
+                break
+        if not found:
+            self.log(f"Classifier file not found (tried): {', '.join(candidates)}")
+            QMessageBox.warning(self, "Recognition", f"Classifier file not found.\nTried:\n\n" + "\n".join(candidates))
+            return
+        # replace the classifier name with absolute path so backend finds it reliably
+        params = (found, "", "", "", "", "", self.inp_res.text().strip(), "", "", "", "", "")
+        # Embedded recognition: start a worker that feeds frames into the camera QLabel
+        # Find classifier file (support names with/without .pkl in some common locations)
+        cand_name = clf if clf.endswith('.pkl') else clf + '.pkl'
+        candidates = [os.path.abspath(cand_name)]
+        train_root = self.inp_train_root.text().strip()
+        if train_root:
+            candidates.append(os.path.abspath(os.path.join(train_root, cand_name)))
+        ds_out = self.inp_ds_out.text().strip()
+        if ds_out:
+            candidates.append(os.path.abspath(os.path.join(ds_out, cand_name)))
+        found = None
+        for p in candidates:
+            if os.path.exists(p):
+                found = p
+                break
+        if not found:
+            self.log(f"Classifier file not found (tried): {', '.join(candidates)}")
+            QMessageBox.warning(self, "Recognition", f"Classifier file not found.\nTried:\n\n" + "\n".join(candidates))
+            return
 
-    btn11 = tkinter.Button(window3, text = "Mark Attendance", fg = "black", bg = 'turquoise1', command = mark_attend)
-    btn11.place(x=635, y=630, width=120)
+        # load classifier
+        try:
+            with open(found, 'rb') as fh:
+                data = pickle.load(fh)
+        except Exception as e:
+            QMessageBox.warning(self, "Classifier", f"Error loading classifier: {e}")
+            return
 
-    btn10 = tkinter.Button(window3, text = "EXIT", fg = "red", bg = 'indianred1', command = s_exit)
-    btn10.place(x=750, y=600, width=60)
+        embeddings_dict = data.get('embeddings', {})
+        if len(embeddings_dict) == 0:
+            QMessageBox.warning(self, "Recognition", "Classifier contains no embeddings (train first)")
+            return
 
-    def home():
-        window3.destroy()
-        gotohome()
+        threshold = data.get('threshold', 0.6)
+        names = list(embeddings_dict.keys())
+        emb_matrix = _np.vstack([embeddings_dict[n] for n in names]).astype(_np.float32)
 
-    btn12 = tkinter.Button(window3, text = "HOME", fg = "black", bg = 'turquoise1', command = home)
-    btn12.place(x=650, y=600, width=90)
+        # start worker
+        self._recog_running = True
+        self.btn_stop_rec.setEnabled(True)
+        self.btn_start_rec.setEnabled(False)
+        self._recog_worker = Worker(self._recognition_loop, args=(emb_matrix, names, threshold, self.inp_res.text().strip()), on_done=self._on_recog_done)
+        # keep showing attendance updates while recognition is running
+        try:
+            if self._recog_timer is None:
+                self._recog_timer = QTimer(self)
+                self._recog_timer.timeout.connect(self.refresh_attendance)
+                self._recog_timer.start(1000)
+        except Exception:
+            traceback.print_exc()
+        self._recog_worker.start()
 
-
-
-    window3.mainloop()
-
-def run_attend(mode, parameters):
-    present = final_sotware.recognize(mode, parameters)
-
-
-def show_create():
-
-    window4 = Tk()
-    window4.title("Attendance System")
-    window4.geometry("800x500")
-    tkinter.Label(window4, text = "^^ WELCOME TO FACE DETECTION AND RECOGNITION SOFTWARE ^^", fg="black", bg="darkorange").pack(fill="x")
-    tkinter.Label(window4, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg='orange').pack(fill='x')
-    tkinter.Label(window4, text="\n\n ").pack(fill='y')
-
-    tkinter.Label(window4, text = "Enter the path to output folder").place(x=50, y=50, width=240)
-    path1 = tkinter.Entry(window4)
-    path1.place(x=60, y=70, width=400)
-
-    tkinter.Label(window4, text = "Enter your supported webcam resolution (eg 640x480)").place(x=50, y=100, width=380)
-    webcam = tkinter.Entry(window4)
-    webcam.place(x=60, y=120, width=400)
-
-    tkinter.Label(window4, text = "Enter the gpu memory fraction u want to allocate(out of 1)").place(x=50, y=150, width=430)
-    gpu = tkinter.Entry(window4)
-    gpu.place(x=60, y=170, width=400)
-
-    tkinter.Label(window4, text = "Enter desired face width and height (WidthxHeight format)").place(x=50, y=200, width=430)
-    face_dim = tkinter.Entry(window4)
-    face_dim.place(x=60, y=220, width=400)
-
-    tkinter.Label(window4, text = "Enter user name (default: person)").place(x=50, y=250, width=260)
-    username = tkinter.Entry(window4)
-    username.place(x=60, y=270, width=400)
-
-    tkinter.Label(window4, text = "Create dataset using:").place(x=50, y=300, width=180)
-
-    rdbtn1 = IntVar()
-    rdbtn2 = IntVar()
-
-    rdbv = tkinter.Checkbutton(window4, text="Video", variable = rdbtn1, fg="black", bg="skyblue1")
-    rdbv.place(x=220, y=300, width=80)
-
-    rdbw = tkinter.Checkbutton(window4, text="Webcam", variable = rdbtn2, fg="black", bg="skyblue1")
-    rdbw.place(x=320, y=300, width=80)
-
-    tkinter.Label(window4, text = "Enter video path (if applicable)").place(x=50, y=330, width=250)
-    vid_path = tkinter.Entry(window4)
-    vid_path.place(x=60, y=350, width=400)
-
-    tkinter.Label(window4, text="Default values would be assigned to empyt fields", fg="navy", bg="lightblue").place(x=50, y=450, width=380)
-
-    tkinter.Label(window4, bg = 'orange').place(y = 485, width = 800)
-
-    get_f = 0
-
-    def submit():
-        #vid_path2 = ''
-        print('submit')
-        '''if rdbtn1.get():
-            print('Video')
-            #vid_path = '/home/aashish/Documents/deep_learning/attendance_deep_learning/scripts_used/video/uri1.webm'
-            vid_path2 = vid_path.get()
-
-        elif rdbtn2.get():
-            print('Webcam')
-            vid_path = ''
+    def _on_recog_done(self, result, exc):
+        # stop live refresh timer
+        try:
+            if getattr(self, '_recog_timer', None):
+                self._recog_timer.stop()
+                self._recog_timer = None
+        except Exception:
+            traceback.print_exc()
+        if exc:
+            self.log("Error in recognize: " + str(exc))
+            QMessageBox.warning(self, "Recognition", f"Error: {exc}")
         else:
-            print('default')
-            vid_path = '' '''
-
-        parameters = path1.get(), webcam.get(), face_dim.get(), gpu.get(), username.get(), vid_path.get()
-        print(parameters)
-        # mode = 'w'
-        get_f = final_sotware.dataset_creation(parameters)
-
-        if get_f == 1:
-            tkinter.messagebox.showinfo("Attendance", "Dataset Created")
-
-
-    btn9 = tkinter.Button(window4, text = "CONTINUE", fg = "black", bg = 'turquoise1', command = submit)
-    btn9.place(x=650, y=200, width=90)
-
-    btn9 = tkinter.Button(window4, text = "EXIT", fg = "red", bg = 'indianred1', command = s_exit)
-    btn9.place(x=650, y=300, width=90)
-
-    def home():
-        window4.destroy()
-        gotohome()
-
-    btn10 = tkinter.Button(window4, text = "HOME", fg = "black", bg = 'turquoise1', command = home)
-    btn10.place(x=650, y=250, width=90)
-
-    window4.mainloop()
-
-
-
-def show_train():
-
-    window5 = Tk()
-    window5.title("Attendance System")
-    window5.geometry("800x500")
-    tkinter.Label(window5, text = "^^ WELCOME TO FACE DETECTION AND RECOGNITION SOFTWARE ^^", fg="black", bg="darkorange").pack(fill="x")
-    tkinter.Label(window5, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg='orange').pack(fill='x')
-    tkinter.Label(window5, text="\n\n ").pack(fill='y')
-
-    tkinter.Label(window5, text = "Enter the path to dataset folder").place(x=50, y=50, width=250)
-    path1 = tkinter.Entry(window5)
-    path1.place(x=60, y=70, width=400)
-
-    tkinter.Label(window5, text = "Enter the path to 20180402-114759 FOLDER").place(x=50, y=100, width=300)
-    path2 = tkinter.Entry(window5)
-    path2.place(x=60, y=120, width=400)
-
-    tkinter.Label(window5, text = "Enter the gpu memory fraction u want to allocate(out of 1)").place(x=50, y=150, width=430)
-    gpu = tkinter.Entry(window5)
-    gpu.place(x=60, y=170, width=400)
-
-    tkinter.Label(window5, text = "Enter the batch size of images to process at once").place(x=50, y=200, width=370)
-    batch = tkinter.Entry(window5)
-    batch.place(x=60, y=220, width=400)
-
-    tkinter.Label(window5, text = "Enter input image dimension (eg. 160)").place(x=50, y=250, width=285)
-    img_dim = tkinter.Entry(window5)
-    img_dim.place(x=60, y=270, width=400)
-
-    tkinter.Label(window5, text = "Enter output SVM classifier filename").place(x=50, y=300, width=275)
-    svm_name = tkinter.Entry(window5)
-    svm_name.place(x=60, y=320, width=400)
-
-    tkinter.Label(window5, text = "Split dataset into training and testing:").place(x=50, y=350, width=305)
-
-    chkbtn1 = IntVar()
-    chkbtn2 = IntVar()
-
-    ckbt1 = tkinter.Checkbutton(window5, text="Yes", variable = chkbtn1, fg="black", bg="skyblue1")
-    ckbt1.place(x=350, y=350, width=50)
-
-    ckbt2 = tkinter.Checkbutton(window5, text="No", variable = chkbtn2, fg="black", bg="skyblue1")
-    ckbt2.place(x=410, y=350, width=50)
-
-    tkinter.Label(window5, text = "Enter split percentage (if applicable)").place(x=50, y=380, width=290)
-    split_percent = tkinter.Entry(window5)
-    split_percent.place(x=60, y=400, width=400)
-
-    tkinter.Label(window5, text="Default values would be assigned to empyt fields", fg="navy", bg="lightblue").place(x=60, y=450, width=380)
-
-    def submit():
-
-        print('submit')
-        if chkbtn1.get():
-            print('Yes')
-            split_data = 'y'
-
-        elif chkbtn2.get():
-            print('No')
-            split_data = ''
-        else:
-            print('default')
-            split_data = 'y'
-
-        parameters = path1.get(), path2.get(), batch.get(), img_dim.get(), gpu.get(), svm_name.get(), split_percent.get(), split_data
-        print(parameters)
-        # mode = 'w'
-        get_f = final_sotware.train(parameters)
-
-        if get_f == 1:
-            tkinter.messagebox.showinfo("Title", "Training Completed")
-
-
-    btn9 = tkinter.Button(window5, text = "CONTINUE", fg = "black", bg = 'turquoise1', command = submit)
-    btn9.place(x=650, y=200, width=90)
-
-    btn9 = tkinter.Button(window5, text = "EXIT", fg = "red", bg = 'indianred1', command = s_exit)
-    btn9.place(x=650, y=300, width=90)
-
-    def home():
-        window5.destroy()
-        gotohome()
-
-    btn10 = tkinter.Button(window5, text = "HOME", fg = "black", bg = 'turquoise1', command = home)
-    btn10.place(x=650, y=250, width=90)
-
-
-    window5.mainloop()
-
-
-
-def show_test():
-
-    window6 = Tk()
-    window6.title("Attendance System")
-    window6.geometry("800x500")
-    tkinter.Label(window6, text = "^^ WELCOME TO FACE DETECTION AND RECOGNITION SOFTWARE ^^", fg="black", bg="darkorange").pack(fill="x")
-    tkinter.Label(window6, text = '- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -', bg='orange').pack(fill='x')
-    tkinter.Label(window6, text="\n\n ").pack(fill='y')
-
-    tkinter.Label(window6, text = "Enter the path to classifier.pkl").place(x=50, y=50, width=250)
-    path1 = tkinter.Entry(window6)
-    path1.place(x=60, y=70, width=400)
-
-    tkinter.Label(window6, text = "Enter the path to 20180402-114759 FOLDER").place(x=50, y=100, width=300)
-    path2 = tkinter.Entry(window6)
-    path2.place(x=60, y=120, width=400)
-
-    tkinter.Label(window6, text="Enter path to dataset folder").place(x=50, y=150, width=230)
-    path3 = tkinter.Entry(window6)
-    path3.place(x=60, y=170, width=400)
-
-    tkinter.Label(window6, text="Enter the batch size of images to process at once").place(x=50, y=200, width=370)
-    batch = tkinter.Entry(window6)
-    batch.place(x=60, y=220, width=400)
-
-    tkinter.Label(window6, text="Enter input image dimension (eg. 160)").place(x=50, y=250, width=285)
-    img_dim = tkinter.Entry(window6)
-    img_dim.place(x=60, y=270, width=400)
-
-    tkinter.Label(window6, text="Default values would be assigned to empyt fields", fg="navy", bg="lightblue").place(x=60, y=450, width=380)
-
-    def submit():
-
-        gpu = 0.8
-        parameters = path1.get(), path2.get(), path3.get(), batch.get(), img_dim.get(), gpu
-        print(parameters)
-        get_f = final_sotware.test(parameters = parameters)
-
-        if get_f == 1:
-            tkinter.messagebox.showinfo("Title", "Training Completed")
-
-
-    btn9 = tkinter.Button(window6, text = "CONTINUE", fg = "black", bg = 'turquoise1', command = submit)
-    btn9.place(x=650, y=200, width=90)
-
-    btn9 = tkinter.Button(window6, text = "EXIT", fg = "red", bg = 'indianred1', command = s_exit)
-    btn9.place(x=650, y=300, width=90)
-
-    def home():
-        window6.destroy()
-        gotohome()
-
-    btn10 = tkinter.Button(window6, text = "HOME", fg = "black", bg = 'turquoise1', command = home)
-    btn10.place(x=650, y=250, width=90)
-
-
-
-    window6.mainloop()
-
-
-
-
-
-def gotohome():
-
-  show()
-  #show_test()
-  #show_train()
-  #putwindow()
-  #show_run()
-  #show_create()
-
-if __name__ == '__main__':
-    putwindow()
-    #show_attend()
+            self.log("Recognition finished. Marked: " + (result if result else "(none)"))
+            QMessageBox.information(self, "Recognition finished", "Marked: " + (result if result else "(none)"))
+            self.refresh_attendance()
+        # reset recognition UI state
+        try:
+            self.btn_stop_rec.setEnabled(False)
+            self.btn_start_rec.setEnabled(True)
+            self._recog_running = False
+            self._recog_worker = None
+        except Exception:
+            pass
+
+    def refresh_attendance(self):
+        self.lst_att.clear()
+        names = attendance.get_marked()
+        for n in names:
+            self.lst_att.addItem(n)
+
+    def clear_attendance(self):
+        confirm = QMessageBox.question(self, "Confirm", "Clear today's attendance?")
+        if confirm == QMessageBox.StandardButton.Yes:
+            attendance.clear_today()
+            self.refresh_attendance()
+            self.log("Today's attendance cleared.")
+
+    def log(self, message):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.txt_logs.append(f"[{ts}] {message}")
+        self.txt_logs.ensureCursorVisible()
+
+    # Embedded recognition helpers
+    def stop_recognition(self):
+        """Signal the background recognition worker to stop."""
+        if self._recog_worker and self._recog_running:
+            self.log("Stopping recognition...")
+            try:
+                self._recog_worker._stop_request = True
+            except Exception:
+                pass
+
+    def _mark_current(self):
+        """User clicks 'Mark Current' to record currently recognized names in attendance."""
+        if not getattr(self, '_recog_current_names', None):
+            QMessageBox.information(self, "Mark Current", "No recognized people to mark right now.")
+            return
+        for nm in list(self._recog_current_names):
+            ok = attendance.mark_present(nm)
+            if ok:
+                self.log(f"Marked present: {nm}")
+        self.refresh_attendance()
+
+    def _display_frame(self, frame, recognized):
+        """Update QLabel with a frame (main thread)."""
+        try:
+            self._recog_current_names = set(recognized)
+            if frame is None:
+                return
+            img = frame
+            if img.ndim == 3 and img.shape[2] == 3:
+                h, w, ch = img.shape
+                bytes_per_line = ch * w
+                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            else:
+                h, w = img.shape[:2]
+                qimg = QImage(img.data, w, h, QImage.Format.Format_Grayscale8)
+            pix = QPixmap.fromImage(qimg).scaled(self.lbl_camera.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            self.lbl_camera.setPixmap(pix)
+        except Exception:
+            traceback.print_exc()
+
+    def _recognition_loop(self, emb_matrix, names, threshold, resolution):
+        """Worker thread: capture frames, run detection & embedding, draw overlays and send frames to UI."""
+        try:
+            cap = cv2.VideoCapture(0)
+            if not cap or not cap.isOpened():
+                self.log("Cannot open camera for recognition")
+                return ""
+            if resolution:
+                try:
+                    wres, hres = tuple(map(int, resolution.split('x')))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, wres)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, hres)
+                except Exception:
+                    pass
+
+            marked_set = set()
+            while True:
+                if getattr(threading.current_thread(), '_stop_request', False):
+                    break
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                boxes = face_detect.detect_faces(frame, conf_threshold=0.6)
+                current_rec = []
+                for b in boxes:
+                    try:
+                        x, y, w, h, conf = int(b[0]), int(b[1]), int(b[2]), int(b[3]), float(b[4] if len(b)>4 else 0.0)
+                    except Exception:
+                        try:
+                            x1, y1, x2, y2 = b[0], b[1], b[2], b[3]
+                            x, y, w, h = int(x1), int(y1), int(x2-x1), int(y2-y1)
+                            conf = float(b[4]) if len(b)>4 else 0.0
+                        except Exception:
+                            continue
+                    x1, y1 = max(0, x), max(0, y)
+                    x2, y2 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    face = frame[y1:y2, x1:x2]
+                    emb = face_detect.get_embedding(face)
+                    label_text = "NoEmb"
+                    if emb is not None and emb_matrix.shape[0] > 0:
+                        sims = emb_matrix @ emb
+                        best_idx = int(_np.argmax(sims))
+                        best_sim = float(sims[best_idx])
+                        name = names[best_idx]
+                        if best_sim >= threshold:
+                            label_text = f"{name} ({best_sim:.2f})"
+                            current_rec.append(name)
+                        else:
+                            label_text = f"Unknown ({best_sim:.2f})"
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
+                    cv2.putText(frame, label_text, (x1 + 2, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+
+                try:
+                    _INVOKER.call.emit(self._display_frame, (frame.copy(), current_rec))
+                except Exception:
+                    pass
+
+                # brief wait so loop yields
+                cv2.waitKey(1)
+
+            cap.release()
+            return ",".join(sorted(set(marked_set)))
+        except Exception:
+            traceback.print_exc()
+            return ""
+
+def main():
+    app = QApplication(sys.argv)
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
