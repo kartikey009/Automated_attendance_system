@@ -11,13 +11,13 @@ import pickle
 import traceback
 from datetime import datetime
 
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QFileDialog, QMessageBox, QListWidget, QTextEdit,
     QGroupBox, QGridLayout, QProgressBar
 )
-from PyQt6.QtGui import QPixmap, QImage
-from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
+from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtCore import Qt, Signal, QObject, QTimer
 import numpy as _np
 import cv2
 
@@ -31,7 +31,7 @@ class _Invoker(QObject):
     """Helper QObject that invokes a Python callable in the QObject's thread
     by emitting a signal from other threads. This ensures UI callbacks are
     executed on the main (Qt) thread."""
-    call = pyqtSignal(object, object)
+    call = Signal(object, object)
 
     def __init__(self):
         super().__init__()
