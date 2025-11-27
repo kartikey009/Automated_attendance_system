@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from transformers import AutoConfig, AutoTokenizer
+from transformers.cache_utils import DynamicCache
 
 from onnxruntime import InferenceSession, OrtValue
 
@@ -84,9 +85,7 @@ def get_sample_with_past_kv_inputs(
     attention_mask = attention_mask.numpy() if engine == "ort" else attention_mask.to(device)
     position_ids = position_ids.numpy() if engine == "ort" else position_ids.to(device)
     past_kv = (
-        flatten_past_kv_inputs(past_kv)
-        if engine == "ort"
-        else list(map(lambda kv: (kv[0].to(device), kv[1].to(device)), past_kv))
+        flatten_past_kv_inputs(past_kv) if engine == "ort" else [(kv[0].to(device), kv[1].to(device)) for kv in past_kv]
     )
 
     if not return_dict:
@@ -143,9 +142,7 @@ def get_merged_sample_with_past_kv_inputs(
     attention_mask = attention_mask.numpy() if engine == "ort" else attention_mask.to(device)
     position_ids = position_ids.numpy() if engine == "ort" else position_ids.to(device)
     past_kv = (
-        flatten_past_kv_inputs(past_kv)
-        if engine == "ort"
-        else list(map(lambda kv: (kv[0].to(device), kv[1].to(device)), past_kv))
+        flatten_past_kv_inputs(past_kv) if engine == "ort" else [(kv[0].to(device), kv[1].to(device)) for kv in past_kv]
     )
 
     if not return_dict:
@@ -244,8 +241,12 @@ def get_past_kv_inputs(config: AutoConfig, batch_size: int, past_seq_len: int, u
 def flatten_past_kv_inputs(past_key_values: list[tuple[torch.Tensor, torch.Tensor]]):
     past_kv = {}
     for i, (past_k, past_v) in enumerate(past_key_values):
-        past_kv[f"past_key_values.{i}.key"] = past_k.detach().cpu().numpy()
-        past_kv[f"past_key_values.{i}.value"] = past_v.detach().cpu().numpy()
+        if isinstance(past_key_values, DynamicCache):
+            past_kv[f"past_key_values_key_cache_{i}"] = past_k.detach().cpu().numpy()
+            past_kv[f"past_key_values_value_cache_{i}"] = past_v.detach().cpu().numpy()
+        else:
+            past_kv[f"past_key_values.{i}.key"] = past_k.detach().cpu().numpy()
+            past_kv[f"past_key_values.{i}.value"] = past_v.detach().cpu().numpy()
     return past_kv
 
 
@@ -255,8 +256,6 @@ def convert_inputs_for_ort(
     use_buffer_share: bool = False,
     past_seq_len: int = 0,
     max_seq_len: int = 2048,
-    device: str = "",
-    device_id: int = -1,
 ):
     ort_inputs = {}
     for k, v in pt_inputs.items():
@@ -268,7 +267,7 @@ def convert_inputs_for_ort(
             ort_inputs[k] = v.detach().cpu().numpy()
 
     # Reshape KV caches if using past-present-share-buffer
-    if use_buffer_share and device != "" and device != "cpu" and device_id > -1:
+    if use_buffer_share:
         ort_inputs = enable_past_present_share_buffer(ort_inputs, past_seq_len, max_seq_len)
 
     return ort_inputs
@@ -291,7 +290,7 @@ def enable_past_present_share_buffer(ort_inputs: dict, past_seq_len: int, max_se
 # Verify ONNX Runtime inputs with model
 def verify_ort_inputs(model: InferenceSession, ort_inputs: dict):
     # Check that all model inputs will be provided
-    model_inputs = set(map(lambda model_input: model_input.name, model.get_inputs()))
+    model_inputs = {model_input.name for model_input in model.get_inputs()}
     user_inputs = set(ort_inputs.keys())
     missing_inputs = model_inputs - user_inputs
     if len(missing_inputs):
@@ -302,7 +301,6 @@ def verify_ort_inputs(model: InferenceSession, ort_inputs: dict):
     unnecessary_inputs = user_inputs - model_inputs
     if len(unnecessary_inputs):
         for unnecessary_input in unnecessary_inputs:
-            print(f"Removing unnecessary input '{unnecessary_input}' from user provided inputs")
             del ort_inputs[unnecessary_input]
 
     return ort_inputs
@@ -320,7 +318,7 @@ def add_io_bindings_as_ortvalues(
 ):
     io_binding = model.io_binding()
 
-    model_inputs = set(map(lambda i: i.name, model.get_inputs()))
+    model_inputs = {i.name for i in model.get_inputs()}
     for k, v in ort_inputs.items():
         # Use this check to handle scenarios such as INT4 CUDA and FP16 CUDA models with
         # GQA + RotaryEmbedding fusion where `position_ids` is removed as an ONNX model input
@@ -384,27 +382,20 @@ def add_io_bindings_as_tensors(
 
     for output in model.get_outputs():
         name = output.name
-        if use_buffer_share and "present" in name:
-            # Bind KV cache outputs to KV cache inputs
-            v = inputs[name.replace("present", "past_key_values")]
-            io_binding.bind_output(
-                name=name,
-                device_type=v.device.type,
-                device_id=v.device.index,
-                element_type=np.float16,
-                shape=tuple(v.shape),
-                buffer_ptr=v.data_ptr(),
-            )
-        else:
-            v = outputs[name]
-            io_binding.bind_output(
-                name=name,
-                device_type=device.type,
-                device_id=0 if device.type == "cpu" else device.index,
-                element_type=(np.float16 if use_fp16 else np.float32),
-                shape=tuple(v.shape),
-                buffer_ptr=v.data_ptr(),
-            )
+        # Bind KV cache outputs to KV cache inputs
+        v = (
+            inputs[name.replace("present", "past_key_values")]
+            if use_buffer_share and "present" in name
+            else outputs[name]
+        )
+        io_binding.bind_output(
+            name=name,
+            device_type=device.type,
+            device_id=0 if device.type == "cpu" else device.index,
+            element_type=(np.float16 if use_fp16 else np.float32),
+            shape=tuple(v.shape),
+            buffer_ptr=v.data_ptr(),
+        )
 
     return io_binding
 
@@ -420,7 +411,7 @@ def get_initial_inputs_and_outputs(
     use_buffer_share: bool,
     engine: str,
 ):
-    tokenizer.pad_token = "[PAD]"
+    tokenizer.pad_token = tokenizer.eos_token
     encodings_dict = tokenizer.batch_encode_plus(prompt, padding=True)
     torch_dtype = torch.float16 if use_fp16 else torch.float32
 

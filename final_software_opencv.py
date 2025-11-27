@@ -10,12 +10,10 @@ Keys in recognition:
  - m: mark currently recognized
  - c: clear today's attendance
  - s: save snapshot of current frame
-Dataset creation:
- - Press 's' to start a burst capture (100 face saves) to create dataset quickly.
-Training:
- - Calculate embedding for each image, average per person -> save classifier_buffalo.pkl
-Classifier format:
- {'embeddings': {name: mean_embedding}, 'threshold': 0.6 }
+
+This version uses VERY STRICT unknown detection:
+ - DEFAULT_THRESHOLD = 0.90
+ - TOP2_MARGIN = 0.12
 """
 
 import os
@@ -29,33 +27,21 @@ import attendance
 def _parse_box(box):
     """
     Normalize detection box into (x,y,w,h,conf).
-    Accepts formats like [x,y,w,h,conf] or [x1,y1,x2,y2,conf,...].
-    Returns ints for x,y,w,h and float for conf.
+    Expects [x,y,w,h,conf].
     """
     try:
-        b = list(box)
-        if len(b) < 4:
-            raise ValueError("box must have at least four values")
-        a0, a1, a2, a3 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
-        # If values look like x1,y1,x2,y2 (x2 > x1 and y2 > y1) convert to x,y,w,h
-        if a2 > a0 and a3 > a1 and (a2 - a0) >= 2 and (a3 - a1) >= 2:
-            x = int(max(0, round(a0)))
-            y = int(max(0, round(a1)))
-            w = int(max(1, round(a2 - a0)))
-            h = int(max(1, round(a3 - a1)))
-        else:
-            x = int(max(0, round(a0)))
-            y = int(max(0, round(a1)))
-            w = int(max(1, round(a2)))
-            h = int(max(1, round(a3)))
-        conf = float(b[4]) if len(b) > 4 else 0.0
+        x = int(box[0]); y = int(box[1]); w = int(box[2]); h = int(box[3])
+        conf = float(box[4]) if len(box) > 4 else 0.0
         return x, y, w, h, conf
     except Exception as e:
         raise ValueError(f"Invalid box format: {box} -> {e}")
 
 DEFAULT_SAVE_BURST = 100
 CLASSIFIER_FILENAME = "classifier_buffalo.pkl"
-DEFAULT_THRESHOLD = 0.60  # cosine similarity threshold (higher = stricter)
+
+# VERY STRICT settings
+DEFAULT_THRESHOLD = 0.90   # cosine similarity threshold (very strict)
+TOP2_MARGIN = 0.12         # require best - second_best >= TOP2_MARGIN
 
 def abs_path_or_default(path):
     if path and path.strip() != "":
@@ -70,10 +56,6 @@ def dataset_creation(parameters):
     """
     path1, webcam, face_dim, gpu, username, vid_path = parameters
 
-    # If the caller provided an explicit path1 use it directly as the output root.
-    # Previously this code joined path1 + 'output' which caused nested directories
-    # when path1 already pointed at the 'output' folder (=> output/output). Use
-    # path1 itself and ensure the folder exists.
     if path1 and path1.strip() != "":
         output_root = os.path.abspath(path1)
     else:
@@ -132,7 +114,7 @@ def dataset_creation(parameters):
                     if not ret2 or frame2 is None:
                         break
                     # detect faces, take largest
-                    boxes = face_detect.detect_faces(frame2, conf_threshold=0.60)
+                    boxes = face_detect.detect_faces(frame2, conf_threshold=0.80)
                     if boxes:
                         boxes_sorted = sorted(boxes, key=lambda b: _parse_box(b)[2]*_parse_box(b)[3], reverse=True)
                         x,y,w,h,_ = _parse_box(boxes_sorted[0])
@@ -147,7 +129,6 @@ def dataset_creation(parameters):
                             if saved % 10 == 0:
                                 print("Saved", saved, "images...")
                     frame_idx += 1
-                    # show a quick visual
                     cv2.putText(frame2, f"Saving: {saved}/{DEFAULT_SAVE_BURST}", (8, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
                     cv2.imshow("Output", frame2)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -159,18 +140,14 @@ def dataset_creation(parameters):
 
 # ---------- Training: collect Buffalo embeddings and average per class ----------
 def _collect_embeddings_labels(root_folder):
-    names = []
-    embeddings = []
-    labels = []
-    label_map = {}
-    idx = 0
     if not os.path.isdir(root_folder):
-        return np.zeros((0,)), np.array([]), {}
+        return {}
+
+    embeddings_dict = {}
     for class_name in sorted(os.listdir(root_folder)):
         class_path = os.path.join(root_folder, class_name)
         if not os.path.isdir(class_path):
             continue
-        # collect all embeddings for this person
         emb_list = []
         for fname in os.listdir(class_path):
             if not fname.lower().endswith(('.png','.jpg','.jpeg')):
@@ -179,7 +156,6 @@ def _collect_embeddings_labels(root_folder):
             img = cv2.imread(img_path)
             if img is None:
                 continue
-            # detect face in the saved image (expect face roughly centered)
             boxes = face_detect.detect_faces(img, conf_threshold=0.5)
             if not boxes:
                 continue
@@ -197,16 +173,9 @@ def _collect_embeddings_labels(root_folder):
             print("No embeddings for class:", class_name, "- skipping")
             continue
         mean_emb = np.mean(np.vstack(emb_list), axis=0)
-        norm = np.linalg.norm(mean_emb)
-        if norm > 0:
-            mean_emb = mean_emb / norm
-        label_map[idx] = class_name
-        embeddings.append(mean_emb)
-        labels.append(idx)
-        idx += 1
-    if len(embeddings) == 0:
-        return np.zeros((0,)), np.array([]), {}
-    return np.vstack(embeddings), np.array(labels), label_map
+        mean_emb = mean_emb / (np.linalg.norm(mean_emb) + 1e-6)
+        embeddings_dict[class_name] = mean_emb
+    return embeddings_dict
 
 def train(parameters):
     """
@@ -220,15 +189,10 @@ def train(parameters):
         print("Dataset folder not found:", dataset_root)
         return 0
     print("Training (collecting Buffalo embeddings)...")
-    emb_array, labels, label_map = _collect_embeddings_labels(dataset_root)
-    if emb_array.shape[0] == 0:
+    embeddings_dict = _collect_embeddings_labels(dataset_root)
+    if len(embeddings_dict) == 0:
         print("No training embeddings found.")
         return 0
-    # build name->embedding dict
-    embeddings_dict = {}
-    for idx, name in label_map.items():
-        embeddings_dict[name] = emb_array[idx]
-    # Save classifier
     classifier_filename = (clf_name + '.pkl') if clf_name else CLASSIFIER_FILENAME
     with open(classifier_filename, 'wb') as f:
         pickle.dump({'embeddings': embeddings_dict, 'threshold': DEFAULT_THRESHOLD}, f)
@@ -237,17 +201,6 @@ def train(parameters):
     return 1
 
 # ---------- Recognize (manual marking using cosine similarity) ----------
-def _cosine(a, b):
-    if a is None or b is None:
-        return -1.0
-    a = np.array(a, dtype=np.float32)
-    b = np.array(b, dtype=np.float32)
-    na = np.linalg.norm(a)
-    nb = np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return -1.0
-    return float(np.dot(a, b) / (na * nb))
-
 def recognize(mode, parameters):
     """
     mode: 'w' webcam, 'v' video, 'i' images
@@ -263,13 +216,11 @@ def recognize(mode, parameters):
     else:
         candidate = classifier_path
     candidate_abs = os.path.abspath(candidate)
-    # Use provided value if it exists or fallback to CLASSIFIER_FILENAME
     if os.path.exists(candidate_abs):
         classifier_path = candidate_abs
     else:
         classifier_path = os.path.abspath(CLASSIFIER_FILENAME)
     if not os.path.exists(classifier_path):
-        # Treat missing classifier as an error so the UI can show an error dialog
         raise FileNotFoundError(f"Classifier file not found: {classifier_path}")
 
     with open(classifier_path, 'rb') as f:
@@ -278,7 +229,6 @@ def recognize(mode, parameters):
     threshold = data.get('threshold', DEFAULT_THRESHOLD)
 
     marked_this_run = set()
-    # prepare arrays for fast compare
     names = list(embeddings_dict.keys())
     if len(names) == 0:
         print("No embeddings in classifier.")
@@ -290,7 +240,7 @@ def recognize(mode, parameters):
     elif mode == "v":
         source = vid_path
     else:
-        # images folder: process and auto-mark (image mode keeps old behavior)
+        # images folder: process and auto-mark
         image_folder = img_path if img_path else ""
         files = [f for f in os.listdir(image_folder) if f.lower().endswith(('.png','.jpg','.jpeg'))]
         for f in files:
@@ -306,11 +256,14 @@ def recognize(mode, parameters):
             emb = face_detect.get_embedding(face)
             if emb is None:
                 continue
-            # cosine similarities
-            sims = (emb_matrix @ emb).astype(np.float32)  # emb_matrix rows are normalized; emb normalized in loader
-            best_idx = int(np.argmax(sims))
+            emb = emb / (np.linalg.norm(emb) + 1e-6)
+            sims = (emb_matrix @ emb).astype(np.float32)
+            sorted_idx = np.argsort(sims)[::-1]
+            best_idx = sorted_idx[0]
+            second_idx = sorted_idx[1] if len(sorted_idx) > 1 else None
             best_sim = float(sims[best_idx])
-            if best_sim >= threshold:
+            second_sim = float(sims[second_idx]) if second_idx is not None else -1
+            if best_sim >= threshold and (best_sim - second_sim) >= TOP2_MARGIN:
                 name = names[best_idx]
                 ok = attendance.mark_present(name)
                 if ok:
@@ -351,16 +304,31 @@ def recognize(mode, parameters):
                 if emb is None:
                     label_text = "NoEmb"
                 else:
-                    # compare with stored embeddings: cosine similarity
+                    # normalize for safety
+                    emb = emb / (np.linalg.norm(emb) + 1e-6)
+
+                    # cosine similarities
                     sims = emb_matrix @ emb
-                    best_idx = int(np.argmax(sims))
+                    sorted_idx = np.argsort(sims)[::-1]
+                    best_idx = sorted_idx[0]
+                    second_idx = sorted_idx[1] if len(sorted_idx) > 1 else None
+
                     best_sim = float(sims[best_idx])
-                    name = names[best_idx]
-                    if best_sim >= threshold:
-                        label_text = f"{name} ({best_sim:.2f})"
-                        current_recognized.add(name)
-                    else:
+                    second_sim = float(sims[second_idx]) if second_idx is not None else -1
+                    best_name = names[best_idx]
+
+                    # RULE 1: threshold
+                    if best_sim < threshold:
                         label_text = f"Unknown ({best_sim:.2f})"
+
+                    # RULE 2: top-2 separation check
+                    elif (best_sim - second_sim) < TOP2_MARGIN:
+                        label_text = f"Unknown ({best_sim:.2f})"
+
+                    else:
+                        label_text = f"{best_name} ({best_sim:.2f})"
+                        current_recognized.add(best_name)
+
                 cv2.rectangle(disp, (x1,y1), (x2,y2), (0,255,0), 1)
                 cv2.putText(disp, label_text, (x1+2, y1-6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1)
             cv2.putText(disp, "q:quit  m:mark current  c:clear today  s:snapshot", (8, disp.shape[0]-10),

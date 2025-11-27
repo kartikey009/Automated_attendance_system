@@ -11,7 +11,6 @@ from threading import Lock
 _attendance_folder = os.path.join(os.getcwd(), "attendance")
 os.makedirs(_attendance_folder, exist_ok=True)
 
-# todays files: attendance/YYYY-MM-DD.csv and attendance/YYYY-MM-DD.xls
 def _today_basename():
     return datetime.now().strftime("%Y-%m-%d")
 
@@ -21,7 +20,6 @@ def _csv_path():
 def _xls_path():
     return os.path.join(_attendance_folder, _today_basename() + ".xls")
 
-# in-memory set of names already marked this run/day
 _marked_today = set()
 _lock = Lock()
 
@@ -71,7 +69,6 @@ def mark_present(name):
     if name == "":
         return False
     with _lock:
-        # prevent duplicates
         if name in _marked_today:
             return False
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -80,23 +77,16 @@ def mark_present(name):
         try:
             _write_xls_from_csv()
         except Exception:
-            # don't fail marking if xls write fails, CSV is primary storage
             pass
     return True
 
 def clear_today():
-    """
-    Clear today's attendance (in-memory set and today's CSV/XLS recreated empty).
-    NOTE: this only resets today's files. Historical files for other dates are untouched.
-    """
     with _lock:
         _marked_today.clear()
-        # overwrite csv with header only
         path = _csv_path()
         with open(path, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["Name", "Timestamp"])
-        # overwrite xls
         try:
             _write_xls_from_csv()
         except Exception:
@@ -104,6 +94,5 @@ def clear_today():
     return True
 
 def get_marked():
-    """Return a sorted list of names marked so far today (in-memory)."""
     with _lock:
         return sorted(list(_marked_today))

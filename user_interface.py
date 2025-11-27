@@ -1,7 +1,8 @@
 # user_interface.py
 """
-PyQt6 modern UI for the Attendance System.
-Wires to final_software_opencv.dataset_creation, train, recognize.
+PySide6 modern UI for the Attendance System.
+Restored "Professional" Look: Dark Theme, Sidebar Navigation, Modular Pages.
+Switched from PyQt6 to PySide6 to resolve DLL load errors.
 """
 
 import sys
@@ -11,44 +12,120 @@ import pickle
 import traceback
 from datetime import datetime
 
+# Switch to PySide6
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QFileDialog, QMessageBox, QListWidget, QTextEdit,
-    QGroupBox, QGridLayout, QProgressBar
+    QGroupBox, QGridLayout, QStackedWidget, QFrame, QSizePolicy
 )
-from PySide6.QtWidgets import QToolBar
-from PySide6.QtGui import QPixmap, QImage
-from PySide6.QtCore import Qt, Signal, QObject, QTimer
+from PySide6.QtGui import QPixmap, QImage, QIcon, QFont, QColor, QPalette
+from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSize
 import numpy as _np
 import cv2
-
-
-# A simple dark stylesheet used to give the UI a modern, compact appearance.
-DARK_STYLESHEET = """
-QWidget { background: #151515; color: #e6e6e6; font-family: Segoe UI, Arial, Sans-serif; }
-QGroupBox { border: 1px solid #333; margin-top: 8px; padding: 8px; background: #171717; }
-QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 4px 6px; color: #f2f2f2; }
-QPushButton { background: #2d2d2d; border: 1px solid #3b3b3b; padding: 6px 10px; border-radius: 4px; color: #eaeaea; }
-QPushButton:hover { background: #3b3b3b; }
-QLineEdit { background: #121212; border: 1px solid #2b2b2b; padding: 6px; color: #f5f5f5; }
-QTextEdit, QListWidget { background: #0f0f0f; border: 1px solid #262626; color: #e6e6e6; }
-QLabel { color: #dddddd; }
-QToolBar { background: #1e1e1e; border: none; padding: 4px; }
-QToolButton { background: transparent; color: #e0e0e0; padding: 6px 8px; }
-QToolButton:hover { background: #2a2a2a; }
-QStatusBar { background: #151515; border-top: 1px solid #252525; }
-"""
 
 # import backend modules
 import final_software_opencv as final
 import attendance
 import face_detect
 
-# Simple worker thread wrapper using threading.Thread
+# -------------------------------------------------------------------------
+# STYLESHEET (Dark Theme)
+# -------------------------------------------------------------------------
+DARK_STYLESHEET = """
+QMainWindow {
+    background-color: #1e1e1e;
+}
+QWidget {
+    background-color: #1e1e1e;
+    color: #f0f0f0;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 14px;
+}
+QGroupBox {
+    border: 1px solid #3d3d3d;
+    border-radius: 6px;
+    margin-top: 24px;
+    font-weight: bold;
+    color: #e0e0e0;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 5px;
+    left: 10px;
+    color: #007acc;
+}
+QLineEdit {
+    background-color: #2d2d2d;
+    border: 1px solid #3d3d3d;
+    border-radius: 4px;
+    padding: 6px;
+    color: #ffffff;
+    selection-background-color: #007acc;
+}
+QLineEdit:focus {
+    border: 1px solid #007acc;
+}
+QPushButton {
+    background-color: #007acc;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background-color: #0098ff;
+}
+QPushButton:pressed {
+    background-color: #005c99;
+}
+QPushButton:disabled {
+    background-color: #3d3d3d;
+    color: #808080;
+}
+QListWidget, QTextEdit {
+    background-color: #252526;
+    border: 1px solid #3d3d3d;
+    border-radius: 4px;
+    color: #e0e0e0;
+}
+QLabel {
+    color: #cccccc;
+}
+/* Sidebar Styles */
+QFrame#Sidebar {
+    background-color: #252526;
+    border-right: 1px solid #3d3d3d;
+}
+QPushButton[class="SidebarBtn"] {
+    background-color: transparent;
+    text-align: left;
+    padding: 12px 20px;
+    border-radius: 0px;
+    border-left: 3px solid transparent;
+    color: #cccccc;
+    font-size: 15px;
+}
+QPushButton[class="SidebarBtn"]:hover {
+    background-color: #2d2d2d;
+    color: white;
+}
+QPushButton[class="SidebarBtn"]:checked {
+    background-color: #1e1e1e;
+    border-left: 3px solid #007acc;
+    color: #007acc;
+    font-weight: bold;
+}
+"""
+
+# -------------------------------------------------------------------------
+# THREADING HELPERS
+# -------------------------------------------------------------------------
+
 class _Invoker(QObject):
-    """Helper QObject that invokes a Python callable in the QObject's thread
-    by emitting a signal from other threads. This ensures UI callbacks are
-    executed on the main (Qt) thread."""
+    """Helper to invoke callbacks on the main thread."""
+    # In PySide6, Signal is used instead of pyqtSignal
     call = Signal(object, object)
 
     def __init__(self):
@@ -61,10 +138,7 @@ class _Invoker(QObject):
         except Exception:
             traceback.print_exc()
 
-
-# create a single invoker instance tied to the main thread
 _INVOKER = _Invoker()
-
 
 class Worker(threading.Thread):
     def __init__(self, fn, args=(), on_done=None):
@@ -74,6 +148,7 @@ class Worker(threading.Thread):
         self.on_done = on_done
         self.result = None
         self.exc = None
+        self._stop_request = False
 
     def run(self):
         try:
@@ -83,532 +158,566 @@ class Worker(threading.Thread):
             traceback.print_exc()
         finally:
             if self.on_done:
+                # Schedule callback on main thread
                 try:
-                    # If on main thread, call directly; otherwise schedule via Qt invoker
-                    if threading.current_thread() is threading.main_thread():
-                        self.on_done(self.result, self.exc)
-                    else:
-                        # If no Qt event loop / QApplication exists (e.g. running headless tests),
-                        # call the callback directly to avoid losing the result. When a
-                        # QApplication exists, schedule the callback on the Qt/main thread
-                        # via our invoker so UI work happens on the correct thread.
-                        try:
-                            from PyQt6.QtWidgets import QApplication
-                            if QApplication.instance() is None:
-                                # no Qt app: call directly
-                                self.on_done(self.result, self.exc)
-                            else:
-                                _INVOKER.call.emit(self.on_done, (self.result, self.exc))
-                        except Exception:
-                            # fallback: direct call
-                            try:
-                                self.on_done(self.result, self.exc)
-                            except Exception:
-                                traceback.print_exc()
+                    _INVOKER.call.emit(self.on_done, (self.result, self.exc))
                 except Exception:
-                    traceback.print_exc()
+                    pass
 
-class MainWindow(QMainWindow):
-    def __init__(self):
+
+class VideoCaptureThread(threading.Thread):
+    """
+    Background thread that opens a cv2.VideoCapture and reads frames continuously.
+    It calls on_open(ok, device_index) and on_frame(frame) back on the main/UI thread
+    via the global _INVOKER.
+    """
+    def __init__(self, device, on_frame=None, on_open=None, read_fps=30):
+        super().__init__(daemon=True)
+        self.device = device
+        self.on_frame = on_frame
+        self.on_open = on_open
+        self.read_fps = read_fps
+        self._stop = threading.Event()
+        self.cap = None
+
+    def run(self):
+        # Try to coerce device into int index or accept string filename
+        device_index = self.device
+        try:
+            if device_index is None:
+                device_index = 0
+            # handle numpy bools
+            try:
+                import numpy as _np
+                is_np_bool = isinstance(device_index, _np.bool_)
+            except Exception:
+                is_np_bool = False
+            if isinstance(device_index, bool) or is_np_bool:
+                device_index = 0
+            if isinstance(device_index, str) and device_index.strip().isdigit():
+                device_index = int(device_index.strip())
+            else:
+                if not isinstance(device_index, (int, str, os.PathLike)):
+                    try:
+                        device_index = int(device_index)
+                    except Exception:
+                        device_index = 0
+        except Exception:
+            device_index = 0
+
+        # Select an API preference on Windows to avoid slow default backends
+        api_pref = None
+        try:
+            if os.name == 'nt':
+                api_pref = cv2.CAP_DSHOW
+        except Exception:
+            api_pref = None
+
+        try:
+            if api_pref is None:
+                self.cap = cv2.VideoCapture(device_index)
+            else:
+                # pass api preference for faster open on Windows
+                try:
+                    self.cap = cv2.VideoCapture(device_index, api_pref)
+                except TypeError:
+                    # older OpenCV may not accept api pref; fallback
+                    self.cap = cv2.VideoCapture(device_index)
+
+            opened = self.cap is not None and self.cap.isOpened()
+            # Notify main thread about open result
+            if self.on_open:
+                _INVOKER.call.emit(self.on_open, (opened, device_index))
+
+            if not opened:
+                return
+
+            # Read frames until stopped
+            delay = 1.0 / max(1, int(self.read_fps))
+            while not self._stop.is_set():
+                try:
+                    ret, frame = self.cap.read()
+                    if not ret or frame is None:
+                        # small sleep if read fails
+                        time.sleep(0.01)
+                        continue
+                    if self.on_frame:
+                        _INVOKER.call.emit(self.on_frame, (frame,))
+                    time.sleep(delay)
+                except Exception:
+                    time.sleep(0.01)
+                    continue
+        finally:
+            try:
+                if self.cap is not None:
+                    try:
+                        self.cap.release()
+                    except Exception:
+                        pass
+                    self.cap = None
+            except Exception:
+                pass
+
+    def stop(self):
+        self._stop.set()
+
+# -------------------------------------------------------------------------
+# PAGES
+# -------------------------------------------------------------------------
+
+class DatasetPage(QWidget):
+    def __init__(self, log_callback):
         super().__init__()
-        self.setWindowTitle("Attendance System — Buffalo + YOLOv8")
-        self.resize(950, 650)
-        self._recog_timer = None
-        # use consistent dark styling across the app
-        self.setStyleSheet(DARK_STYLESHEET)
-        # build app chrome (menu / toolbar / status) before widgets
-        self._create_menu_and_toolbar()
+        self.log = log_callback
         self._build_ui()
-        self.log("UI ready")
 
     def _build_ui(self):
-        central = QWidget()
-        main = QVBoxLayout(central)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
 
-        # Header (icon + title + subtitle)
-        header_row = QHBoxLayout()
-        icon_lab = QLabel()
-        icon_lab.setFixedSize(48, 48)
-        icon_lab.setText("🛰️")
-        icon_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_lab.setStyleSheet('font-size:24px;')
+        title = QLabel("Create Dataset")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
 
-        title_box = QVBoxLayout()
-        title = QLabel("Automated Attendance")
-        title.setStyleSheet("font-size:18px; font-weight:700; color: #ffffff;")
-        subtitle = QLabel("Buffalo_L embeddings + YOLOv8 Face Detector")
-        subtitle.setStyleSheet("font-size:11px; color: #bdbdbd; margin-top:2px;")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        title_box.setContentsMargins(8, 0, 0, 0)
-
-        header_row.addWidget(icon_lab, 0)
-        header_row.addLayout(title_box, 1)
-        header_row.addStretch()
-
-        header = QWidget()
-        header.setLayout(header_row)
-        header.setStyleSheet('padding: 6px 10px 8px 10px;')
-        main.addWidget(header)
-
-        # Top controls: Dataset / Train / Recognize
-        group = QGroupBox("Actions")
+        group = QGroupBox("Dataset Configuration")
         gbox = QGridLayout(group)
-        gbox.addWidget(QLabel("Dataset Output Root:"), 0, 0)
+        gbox.setVerticalSpacing(15)
+
+        gbox.addWidget(QLabel("Output Directory:"), 0, 0)
         self.inp_ds_out = QLineEdit(os.path.join(os.getcwd(), "output"))
         gbox.addWidget(self.inp_ds_out, 0, 1)
-        btn_ds_browse = QPushButton("Browse")
-        btn_ds_browse.clicked.connect(self.browse_dataset_root)
-        gbox.addWidget(btn_ds_browse, 0, 2)
+        btn_browse = QPushButton("Browse")
+        btn_browse.clicked.connect(self.browse_root)
+        gbox.addWidget(btn_browse, 0, 2)
 
-        gbox.addWidget(QLabel("Username (for dataset):"), 1, 0)
+        gbox.addWidget(QLabel("User Name:"), 1, 0)
         self.inp_ds_name = QLineEdit("person1")
+        self.inp_ds_name.setPlaceholderText("Enter name of the person")
         gbox.addWidget(self.inp_ds_name, 1, 1)
 
-        btn_create = QPushButton("Create Dataset")
-        btn_create.clicked.connect(self.create_dataset)
-        gbox.addWidget(btn_create, 1, 2)
+        layout.addWidget(group)
 
-        gbox.addWidget(QLabel("Dataset Root for Training:"), 2, 0)
-        self.inp_train_root = QLineEdit(os.path.join(os.getcwd(), "output"))
-        gbox.addWidget(self.inp_train_root, 2, 1)
-        btn_train = QPushButton("Train — Compute embeddings")
-        btn_train.clicked.connect(self.start_train)
-        gbox.addWidget(btn_train, 2, 2)
+        # Camera preview (embedded in UI)
+        self.lbl_preview = QLabel("Camera Preview")
+        self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_preview.setMinimumSize(640, 480)
+        self.lbl_preview.setStyleSheet("background-color: #000; border: 2px solid #3d3d3d; border-radius: 4px;")
+        layout.addWidget(self.lbl_preview)
 
-        gbox.addWidget(QLabel("Classifier filename:"), 3, 0)
-        self.inp_classifier = QLineEdit("classifier_buffalo")
-        gbox.addWidget(self.inp_classifier, 3, 1)
-        btn_reload = QPushButton("Load Classifier")
-        btn_reload.clicked.connect(self.load_classifier)
-        gbox.addWidget(btn_reload, 3, 2)
+        # Camera controls
+        ctrl_layout = QHBoxLayout()
 
-        gbox.addWidget(QLabel("Recognition resolution (e.g. 640x480):"), 4, 0)
-        self.inp_res = QLineEdit("640x480")
-        gbox.addWidget(self.inp_res, 4, 1)
+        self.btn_start_cam = QPushButton("Open Camera")
+        self.btn_start_cam.setMinimumHeight(40)
+        self.btn_start_cam.setStyleSheet("font-size: 14px; background-color: #007acc;")
+        self.btn_start_cam.clicked.connect(self.start_camera)
+        ctrl_layout.addWidget(self.btn_start_cam)
 
-        # Recog controls moved into Camera area below (embedded view)
+        self.btn_burst = QPushButton("Start Burst Capture")
+        self.btn_burst.setMinimumHeight(40)
+        self.btn_burst.setStyleSheet("font-size: 14px; background-color: #f39c12; color: #000;")
+        self.btn_burst.clicked.connect(self.start_burst_capture)
+        self.btn_burst.setEnabled(False)
+        ctrl_layout.addWidget(self.btn_burst)
 
-        main.addWidget(group)
-        mid = QHBoxLayout()
-        # Camera display (embedded inside UI)
-        cam_box = QGroupBox("Camera / Recognition")
-        cam_v = QVBoxLayout(cam_box)
-        # camera display QLabel
-        self.lbl_camera = QLabel()
-        self.lbl_camera.setMinimumSize(640, 480)
-        self.lbl_camera.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_camera.setStyleSheet("background: #222; border: 1px solid #444;")
-        cam_v.addWidget(self.lbl_camera)
-        # Controls below camera
-        cam_controls = QHBoxLayout()
-        cam_controls.setSpacing(8)
-        cam_controls.setContentsMargins(4, 6, 4, 6)
-        # Camera controls: preview + recognition
-        self.btn_preview = QPushButton("Preview Camera")
-        self.btn_preview.setCheckable(True)
-        self.btn_preview.clicked.connect(self.toggle_preview)
+        self.btn_stop_cam = QPushButton("Stop Camera")
+        self.btn_stop_cam.setMinimumHeight(40)
+        self.btn_stop_cam.setStyleSheet("font-size: 14px; background-color: #d9534f;")
+        self.btn_stop_cam.clicked.connect(self.stop_camera)
+        self.btn_stop_cam.setEnabled(False)
+        ctrl_layout.addWidget(self.btn_stop_cam)
 
-        self.btn_start_rec = QPushButton("Start Recognition")
-        self.btn_start_rec.clicked.connect(self.start_recognition)
-        self.btn_stop_rec = QPushButton("Stop Recognition")
-        self.btn_stop_rec.clicked.connect(self.stop_recognition)
-        self.btn_stop_rec.setEnabled(False)
-        self.btn_mark_current = QPushButton("Mark Current")
-        self.btn_mark_current.clicked.connect(self._mark_current)
-        cam_controls.addWidget(self.btn_start_rec)
-        cam_controls.addWidget(self.btn_preview)
-        cam_controls.addWidget(self.btn_stop_rec)
-        cam_controls.addWidget(self.btn_mark_current)
-        cam_v.addLayout(cam_controls)
-        mid.addWidget(cam_box, 3)
-        # Logs
-        logs_box = QGroupBox("Logs / Status")
-        logs_layout = QVBoxLayout(logs_box)
-        self.txt_logs = QTextEdit()
-        self.txt_logs.setReadOnly(True)
-        logs_layout.addWidget(self.txt_logs)
-        mid.addWidget(logs_box, 2)
+        layout.addLayout(ctrl_layout)
+        
+        layout.addStretch()
 
-        # Attendance list
-        att_box = QGroupBox("Today's Attendance")
-        att_layout = QVBoxLayout(att_box)
-        self.lst_att = QListWidget()
-        att_layout.addWidget(self.lst_att)
-        btn_refresh = QPushButton("Refresh")
-        btn_refresh.clicked.connect(self.refresh_attendance)
-        btn_clear = QPushButton("Clear Today")
-        btn_clear.clicked.connect(self.clear_attendance)
-        att_layout.addWidget(btn_refresh)
-        att_layout.addWidget(btn_clear)
-        mid.addWidget(att_box, 1)
-
-        main.addLayout(mid)
-
-        # Footer
-        footer = QLabel("Keys during recognition: m = mark, q = quit, c = clear today, s = snapshot")
-        footer.setStyleSheet("color: #9a9a9a; font-size:11px; padding:8px 4px 6px 4px;")
-        main.addWidget(footer)
-
-        self.setCentralWidget(central)
-
-        # initial refresh
-        self.refresh_attendance()
-
-        # recognition state
-        self._recog_worker = None
-        self._recog_running = False
-        self._recog_current_names = set()
-        # preview state (separate from recognition)
-        self._preview_worker = None
-        self._preview_running = False
-
-    def browse_dataset_root(self):
+    def browse_root(self):
         d = QFileDialog.getExistingDirectory(self, "Select dataset root", self.inp_ds_out.text())
         if d:
             self.inp_ds_out.setText(d)
 
     def create_dataset(self):
+        # Legacy create_dataset kept as compatibility route: start the camera instead
+        self.start_camera()
+
+    def _on_done(self, result, exc):
+        if exc:
+            self.log(f"Dataset creation failed: {exc}")
+            QMessageBox.warning(self, "Error", f"Dataset creation failed: {exc}")
+        else:
+            self.log("Dataset creation completed successfully.")
+            QMessageBox.information(self, "Success", "Dataset creation finished.")
+
+    # ---------------------- Embedded camera logic ----------------------
+    def start_camera(self, device_index=0, *args):
+        # Open camera and start timer
+        if hasattr(self, 'cap') and self.cap is not None and self.cap.isOpened():
+            return
+        try:
+            # When connected to a QPushButton.clicked signal the slot may receive
+            # a boolean checked argument (False) or other unexpected types. Normalize
+            # common values into an int camera index or a filename-like string.
+            if device_index is None:
+                device_index = 0
+            # treat numpy.bool_ and bool both as default camera (0)
+            try:
+                import numpy as _np
+                is_np_bool = isinstance(device_index, _np.bool_)
+            except Exception:
+                is_np_bool = False
+
+            if isinstance(device_index, bool) or is_np_bool:
+                device_index = 0
+
+            # numeric-like: '0', '1' or floats (0.0) -> int
+            if isinstance(device_index, str) and device_index.strip().isdigit():
+                device_index = int(device_index.strip())
+            else:
+                # try to coerce floats or numeric objects to int safely
+                if not isinstance(device_index, (int, str, os.PathLike)):
+                    try:
+                        device_index = int(device_index)
+                    except Exception:
+                        # fallback to default camera
+                        device_index = 0
+            self.cap = cv2.VideoCapture(device_index)
+            if not self.cap.isOpened():
+                QMessageBox.warning(self, "Error", f"Unable to open camera: {device_index}")
+                self.cap = None
+                return
+            # set reasonable resolution
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+            self.timer = QTimer(self)
+            self.timer.timeout.connect(self._update_preview)
+            self.timer.start(30)
+
+            self.last_frame = None
+            self.btn_start_cam.setEnabled(False)
+            self.btn_burst.setEnabled(True)
+            self.btn_stop_cam.setEnabled(True)
+            self.log("Camera opened for dataset creation.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to open camera: {e}")
+
+    def stop_camera(self, *args):
+        # Stop timer and release camera
+        try:
+            if hasattr(self, 'timer') and self.timer is not None:
+                self.timer.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'cap') and self.cap is not None:
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
+        except Exception:
+            pass
+
+        self.lbl_preview.setPixmap(QPixmap())
+        self.btn_start_cam.setEnabled(True)
+        self.btn_burst.setEnabled(False)
+        self.btn_stop_cam.setEnabled(False)
+        self.log("Camera stopped.")
+
+    def _update_preview(self):
+        # Read a frame and display
+        if not hasattr(self, 'cap') or self.cap is None:
+            return
+        ret, frame = self.cap.read()
+        if not ret or frame is None:
+            return
+        # save last frame for burst worker
+        self.last_frame = frame.copy()
+        # draw any helpful text
+        disp = frame.copy()
+        cv2.putText(disp, "Dataset Capture - press 'Start Burst Capture' to save frames.", (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+        # Convert to QImage
+        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(self.lbl_preview.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        self.lbl_preview.setPixmap(pix)
+
+    def start_burst_capture(self, *args):
+        # Verify path & username
         out = self.inp_ds_out.text().strip()
         name = self.inp_ds_name.text().strip()
         if not name:
             QMessageBox.warning(self, "Error", "Please enter a user name")
             return
-        params = (out, "", "", "", name, "")
-        self.log("Starting dataset creation thread...")
-        w = Worker(final.dataset_creation, args=(params,), on_done=self._on_dataset_done)
+        out_root = out if out else os.path.join(os.getcwd(), 'output')
+        os.makedirs(out_root, exist_ok=True)
+        folder_name = name.replace(' ', '_') if name.strip() != '' else 'person1'
+        users_folder = os.path.join(out_root, folder_name)
+        os.makedirs(users_folder, exist_ok=True)
+
+        # disable controls
+        self.btn_burst.setEnabled(False)
+        self.btn_start_cam.setEnabled(False)
+        self.btn_stop_cam.setEnabled(False)
+        self.log(f"Starting burst capture into: {users_folder}")
+
+        # run worker to save DEFAULT_SAVE_BURST frames
+        w = Worker(self._burst_worker, args=(users_folder, final.DEFAULT_SAVE_BURST), on_done=self._on_burst_done)
         w.start()
 
-    def _on_dataset_done(self, result, exc):
+    def _burst_worker(self, users_folder, count):
+        saved = 0
+        tries = 0
+        # read from last_frame repeatedly until we saved `count` faces or camera closes
+        while saved < count:
+            if not hasattr(self, 'last_frame') or self.last_frame is None:
+                tries += 1
+                if tries > 100:
+                    break
+                import time; time.sleep(0.05)
+                continue
+            frame = self.last_frame.copy()
+            # perform detection on current frame
+            boxes = face_detect.detect_faces(frame, conf_threshold=0.60)
+            if boxes:
+                # pick largest
+                boxes_sorted = sorted(boxes, key=lambda b: (b[2]*b[3]) if len(b) >= 4 else 0, reverse=True)
+                # parse
+                try:
+                    x,y,w,h,_ = final._parse_box(boxes_sorted[0])
+                except Exception:
+                    # fallback: use list structure from detect_faces
+                    b = boxes_sorted[0]
+                    x,y,w,h = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                x1,y1 = max(0,x), max(0,y)
+                x2,y2 = min(frame.shape[1], x+w), min(frame.shape[0], y+h)
+                if x2 > x1 and y2 > y1:
+                    face = frame[y1:y2, x1:x2]
+                    fname = os.path.join(users_folder, f"{os.path.basename(users_folder)}_{str(saved+1).zfill(4)}.png")
+                    try:
+                        cv2.imwrite(fname, face)
+                        saved += 1
+                    except Exception:
+                        pass
+            import time; time.sleep(0.03)
+        return saved
+
+    def _on_burst_done(self, result, exc):
         if exc:
-            self.log("Dataset creation error: " + str(exc))
-            QMessageBox.warning(self, "Dataset", f"Error: {exc}")
+            self.log(f"Burst capture failed: {exc}")
+            QMessageBox.warning(self, "Error", f"Burst capture failed: {exc}")
         else:
-            self.log("Dataset creation finished.")
-            QMessageBox.information(self, "Dataset", "Dataset creation finished.")
+            self.log(f"Burst capture completed: saved {result} images")
+            QMessageBox.information(self, "Done", f"Saved {result} images.")
+
+        # re-enable controls if camera still active
+        self.btn_start_cam.setEnabled(True)
+        self.btn_stop_cam.setEnabled(True if hasattr(self,'cap') and self.cap is not None else False)
+        self.btn_burst.setEnabled(True)
+
+
+class TrainPage(QWidget):
+    def __init__(self, log_callback):
+        super().__init__()
+        self.log = log_callback
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
+
+        title = QLabel("Train Model")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        group = QGroupBox("Training Configuration")
+        gbox = QGridLayout(group)
+        gbox.setVerticalSpacing(15)
+
+        gbox.addWidget(QLabel("Dataset Root:"), 0, 0)
+        self.inp_train_root = QLineEdit(os.path.join(os.getcwd(), "output"))
+        gbox.addWidget(self.inp_train_root, 0, 1)
+        
+        gbox.addWidget(QLabel("Classifier Filename:"), 1, 0)
+        self.inp_classifier = QLineEdit("classifier_buffalo")
+        self.inp_classifier.setPlaceholderText("e.g. classifier_buffalo")
+        gbox.addWidget(self.inp_classifier, 1, 1)
+
+        layout.addWidget(group)
+
+        btn_train = QPushButton("Start Training")
+        btn_train.setMinimumHeight(50)
+        btn_train.setStyleSheet("font-size: 16px; background-color: #28a745;") # Green for train
+        btn_train.clicked.connect(self.start_train)
+        layout.addWidget(btn_train)
+
+        layout.addStretch()
 
     def start_train(self):
         root = self.inp_train_root.text().strip()
-        if not os.path.isdir(root):
-            QMessageBox.warning(self, "Error", "Invalid dataset root")
-            return
         clf_name = self.inp_classifier.text().strip()
+        
+        if not os.path.isdir(root):
+            QMessageBox.warning(self, "Error", "Invalid dataset root directory")
+            return
+            
         params = (root, "", "", "", "", clf_name, "", "")
-        self.log("Starting training thread...")
-        w = Worker(final.train, args=(params,), on_done=self._on_train_done)
+        self.log(f"Starting training with root='{root}'...")
+        w = Worker(final.train, args=(params,), on_done=self._on_done)
         w.start()
 
-    def _on_train_done(self, result, exc):
+    def _on_done(self, result, exc):
         if exc:
-            self.log("Training error: " + str(exc))
-            QMessageBox.warning(self, "Training", f"Error: {exc}")
+            self.log(f"Training failed: {exc}")
+            QMessageBox.warning(self, "Error", f"Training failed: {exc}")
         else:
-            self.log("Training finished.")
-            QMessageBox.information(self, "Training", "Training finished. Load classifier to use recognition.")
+            self.log("Training finished successfully.")
+            QMessageBox.information(self, "Success", "Training finished. You can now use the classifier for recognition.")
+
+
+class RecognitionPage(QWidget):
+    def __init__(self, log_callback, attendance_callback):
+        super().__init__()
+        self.log = log_callback
+        self.refresh_attendance = attendance_callback
+        self._recog_worker = None
+        self._recog_running = False
+        self._recog_current_names = set()
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Top bar: Settings
+        top_layout = QHBoxLayout()
+        self.inp_clf_path = QLineEdit("classifier_buffalo")
+        self.inp_clf_path.setPlaceholderText("Classifier Path")
+        btn_load = QPushButton("Load Classifier")
+        btn_load.clicked.connect(self.load_classifier)
+        
+        top_layout.addWidget(QLabel("Classifier:"))
+        top_layout.addWidget(self.inp_clf_path)
+        top_layout.addWidget(btn_load)
+        layout.addLayout(top_layout)
+
+        # Camera View
+        self.lbl_camera = QLabel("Camera Feed")
+        self.lbl_camera.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.lbl_camera.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_camera.setStyleSheet("background-color: #000; border: 2px solid #3d3d3d; border-radius: 4px;")
+        self.lbl_camera.setMinimumSize(640, 480)
+        layout.addWidget(self.lbl_camera)
+
+        # Controls
+        controls = QHBoxLayout()
+        self.btn_start = QPushButton("Start Recognition")
+        self.btn_start.clicked.connect(self.start_recognition)
+        self.btn_start.setStyleSheet("background-color: #007acc; font-size: 16px; padding: 10px;")
+        
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.clicked.connect(self.stop_recognition)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setStyleSheet("background-color: #d9534f; font-size: 16px; padding: 10px;")
+
+        self.btn_mark = QPushButton("Mark Present")
+        self.btn_mark.clicked.connect(self._mark_current)
+        self.btn_mark.setStyleSheet("background-color: #f0ad4e; color: #000; font-size: 16px; padding: 10px;")
+
+        controls.addWidget(self.btn_start)
+        controls.addWidget(self.btn_stop)
+        controls.addWidget(self.btn_mark)
+        layout.addLayout(controls)
 
     def load_classifier(self):
-        fname = self.inp_classifier.text().strip()
-        if not fname:
-            fname = "classifier_buffalo"
-        # Accept names with or without .pkl and search some likely locations
+        fname = self.inp_clf_path.text().strip()
+        if not fname: fname = "classifier_buffalo"
+        
+        # Search logic
         cand_name = fname if fname.endswith(".pkl") else fname + ".pkl"
-        candidates = []
-        # If user typed an absolute path already, try that first
-        if os.path.isabs(fname):
-            candidates.append(fname)
-        # Common locations to check (in order): as typed, project cwd, train root, dataset output
-        candidates.append(os.path.abspath(cand_name))
-        train_root = self.inp_train_root.text().strip()
-        if train_root:
-            candidates.append(os.path.abspath(os.path.join(train_root, cand_name)))
-        ds_out = self.inp_ds_out.text().strip()
-        if ds_out:
-            candidates.append(os.path.abspath(os.path.join(ds_out, cand_name)))
-        # remove duplicates preserving order
-        seen = set()
-        unique = []
-        for p in candidates:
-            if p and p not in seen:
-                unique.append(p);
-                seen.add(p)
+        candidates = [os.path.abspath(cand_name)]
+        # Add common paths
+        candidates.append(os.path.join(os.getcwd(), cand_name))
+        candidates.append(os.path.join(os.getcwd(), "output", cand_name))
+        
         found = None
-        for p in unique:
+        for p in candidates:
             if os.path.exists(p):
                 found = p
                 break
-        if not found:
-            QMessageBox.warning(self, "Classifier",
-                                f"Classifier not found. Tried:\n\n" + "\n".join(unique) + "\n\nRun training to create a classifier or select the correct path.")
-            return
-        path = found
+        
+        if found:
+            self.inp_clf_path.setText(found)
+            self.log(f"Classifier found: {found}")
+            QMessageBox.information(self, "Classifier", f"Found: {found}")
+            return found
+        else:
+            self.log(f"Classifier not found. Tried: {candidates}")
+            QMessageBox.warning(self, "Error", "Classifier not found.")
+            return None
+
+    def start_recognition(self):
+        path = self.load_classifier()
+        if not path: return
+
         try:
             with open(path, 'rb') as f:
                 data = pickle.load(f)
-            self.classifier_loaded = path
-            self.log(f"Classifier loaded: {path}  (contains {len(data.get('embeddings', {}))} classes)")
         except Exception as e:
-            self.log("Load classifier error: " + str(e))
-            QMessageBox.warning(self, "Classifier", f"Error loading classifier: {e}")
-
-    def start_recognition(self):
-        # build params tuple
-        clf = self.inp_classifier.text().strip()
-        if not clf:
-            clf = "classifier_buffalo"
-        params = (clf, "", "", "", "", "", self.inp_res.text().strip(), "", "", "", "", "")
-        # Pre-check classifier exists (allow search in several probable locations)
-        cand_name = clf if clf.endswith('.pkl') else clf + '.pkl'
-        candidates = [os.path.abspath(cand_name)]
-        train_root = self.inp_train_root.text().strip()
-        if train_root:
-            candidates.append(os.path.abspath(os.path.join(train_root, cand_name)))
-        ds_out = self.inp_ds_out.text().strip()
-        if ds_out:
-            candidates.append(os.path.abspath(os.path.join(ds_out, cand_name)))
-        found = None
-        for p in candidates:
-            if os.path.exists(p):
-                found = p
-                break
-        if not found:
-            self.log(f"Classifier file not found (tried): {', '.join(candidates)}")
-            QMessageBox.warning(self, "Recognition", f"Classifier file not found.\nTried:\n\n" + "\n".join(candidates))
-            return
-        # replace the classifier name with absolute path so backend finds it reliably
-        params = (found, "", "", "", "", "", self.inp_res.text().strip(), "", "", "", "", "")
-        # Embedded recognition: start a worker that feeds frames into the camera QLabel
-        # Find classifier file (support names with/without .pkl in some common locations)
-        cand_name = clf if clf.endswith('.pkl') else clf + '.pkl'
-        candidates = [os.path.abspath(cand_name)]
-        train_root = self.inp_train_root.text().strip()
-        if train_root:
-            candidates.append(os.path.abspath(os.path.join(train_root, cand_name)))
-        ds_out = self.inp_ds_out.text().strip()
-        if ds_out:
-            candidates.append(os.path.abspath(os.path.join(ds_out, cand_name)))
-        found = None
-        for p in candidates:
-            if os.path.exists(p):
-                found = p
-                break
-        if not found:
-            self.log(f"Classifier file not found (tried): {', '.join(candidates)}")
-            QMessageBox.warning(self, "Recognition", f"Classifier file not found.\nTried:\n\n" + "\n".join(candidates))
-            return
-
-        # load classifier
-        try:
-            with open(found, 'rb') as fh:
-                data = pickle.load(fh)
-        except Exception as e:
-            QMessageBox.warning(self, "Classifier", f"Error loading classifier: {e}")
+            self.log(f"Error loading pickle: {e}")
             return
 
         embeddings_dict = data.get('embeddings', {})
-        if len(embeddings_dict) == 0:
-            QMessageBox.warning(self, "Recognition", "Classifier contains no embeddings (train first)")
+        if not embeddings_dict:
+            QMessageBox.warning(self, "Error", "No embeddings in classifier.")
             return
 
         threshold = data.get('threshold', 0.6)
         names = list(embeddings_dict.keys())
         emb_matrix = _np.vstack([embeddings_dict[n] for n in names]).astype(_np.float32)
 
-        # If preview is running, stop it so recognition can own the camera
-        if getattr(self, '_preview_running', False):
-            try:
-                self.stop_preview()
-            except Exception:
-                pass
-
-        # start worker
         self._recog_running = True
-        self.btn_stop_rec.setEnabled(True)
-        self.btn_start_rec.setEnabled(False)
-        self._recog_worker = Worker(self._recognition_loop, args=(emb_matrix, names, threshold, self.inp_res.text().strip()), on_done=self._on_recog_done)
-        # keep showing attendance updates while recognition is running
-        try:
-            if self._recog_timer is None:
-                self._recog_timer = QTimer(self)
-                self._recog_timer.timeout.connect(self.refresh_attendance)
-                self._recog_timer.start(1000)
-        except Exception:
-            traceback.print_exc()
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        
+        self._recog_worker = Worker(self._recognition_loop, args=(emb_matrix, names, threshold), on_done=self._on_recog_done)
         self._recog_worker.start()
+        self.log("Recognition started.")
 
-    # --- Camera preview helpers -------------------------------------------------
-    def toggle_preview(self, checked: bool):
-        """Toggle the camera preview without running recognition."""
-        if checked:
-            self.start_preview()
-        else:
-            self.stop_preview()
-
-    def start_preview(self):
-        if getattr(self, '_preview_running', False):
-            return
-        self._preview_running = True
-        # disable starting recognition while preview is active to avoid camera conflicts
-        try:
-            self.btn_start_rec.setEnabled(False)
-        except Exception:
-            pass
-        # launch preview worker
-        self._preview_worker = Worker(self._preview_loop, args=(self.inp_res.text().strip(),), on_done=self._on_preview_done)
-        self._preview_worker.start()
-
-    def stop_preview(self):
-        if not getattr(self, '_preview_running', False):
-            return
-        try:
-            # signal worker to stop — Worker threads check _stop_request attr
-            if self._preview_worker:
-                self._preview_worker._stop_request = True
-        except Exception:
-            pass
-
-    def _on_preview_done(self, result, exc):
-        # Called when preview worker ends; clear state and re-enable recognition button
-        self._preview_running = False
-        try:
-            self.btn_preview.setChecked(False)
-            self.btn_start_rec.setEnabled(True)
-            # clear camera image if preview stopped and recognition not running
-            if not getattr(self, '_recog_running', False):
-                self.lbl_camera.clear()
-                self.lbl_camera.setStyleSheet("background: #222; border: 1px solid #444;")
-        except Exception:
-            traceback.print_exc()
-
-    def _preview_loop(self, resolution):
-        """Background preview capture loop: reads frames and sends them to _display_frame.
-        This does not run detection/recognition and will run until _stop_request is set."""
-        try:
-            cap = cv2.VideoCapture(0)
-            if not cap or not cap.isOpened():
-                self.log("Cannot open camera for preview")
-                return ""
-            if resolution:
-                try:
-                    wres, hres = tuple(map(int, resolution.split('x')))
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, wres)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, hres)
-                except Exception:
-                    pass
-
-            while True:
-                if getattr(threading.current_thread(), '_stop_request', False):
-                    break
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    continue
-                try:
-                    _INVOKER.call.emit(self._display_frame, (frame.copy(), []))
-                except Exception:
-                    pass
-                # small yield
-                cv2.waitKey(1)
-
-            cap.release()
-            return ""
-        except Exception:
-            traceback.print_exc()
-            return ""
-
-    def _create_menu_and_toolbar(self):
-        # Menu bar
-        menubar = self.menuBar()
-        file_menu = menubar.addMenu("File")
-        help_menu = menubar.addMenu("Help")
-
-        exit_act = file_menu.addAction("Exit")
-        exit_act.triggered.connect(self.close)
-
-        about_act = help_menu.addAction("About")
-        about_act.triggered.connect(self._show_about)
-
-        # Toolbar
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        tb.addAction(exit_act)
-        tb.addAction(about_act)
-        self.addToolBar(tb)
-
-        # Status bar
-        st = self.statusBar()
-        st.showMessage("Ready — local environment")
-
-    def _show_about(self):
-        QMessageBox.information(self, "About", "Automated Attendance\nUI — polished with PySide6\nRun using your virtual environment")
+    def stop_recognition(self):
+        if self._recog_worker:
+            self._recog_worker._stop_request = True
+            self.log("Stopping recognition...")
 
     def _on_recog_done(self, result, exc):
-        # stop live refresh timer
-        try:
-            if getattr(self, '_recog_timer', None):
-                self._recog_timer.stop()
-                self._recog_timer = None
-        except Exception:
-            traceback.print_exc()
+        self._recog_running = False
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.lbl_camera.clear()
+        self.lbl_camera.setText("Camera Stopped")
         if exc:
-            self.log("Error in recognize: " + str(exc))
-            QMessageBox.warning(self, "Recognition", f"Error: {exc}")
+            self.log(f"Recognition error: {exc}")
         else:
-            self.log("Recognition finished. Marked: " + (result if result else "(none)"))
-            QMessageBox.information(self, "Recognition finished", "Marked: " + (result if result else "(none)"))
-            self.refresh_attendance()
-        # reset recognition UI state
-        try:
-            self.btn_stop_rec.setEnabled(False)
-            self.btn_start_rec.setEnabled(True)
-            self._recog_running = False
-            self._recog_worker = None
-        except Exception:
-            pass
-
-    def refresh_attendance(self):
-        self.lst_att.clear()
-        names = attendance.get_marked()
-        for n in names:
-            self.lst_att.addItem(n)
-
-    def clear_attendance(self):
-        confirm = QMessageBox.question(self, "Confirm", "Clear today's attendance?")
-        if confirm == QMessageBox.StandardButton.Yes:
-            attendance.clear_today()
-            self.refresh_attendance()
-            self.log("Today's attendance cleared.")
-
-    def log(self, message):
-        ts = datetime.now().strftime("%H:%M:%S")
-        self.txt_logs.append(f"[{ts}] {message}")
-        self.txt_logs.ensureCursorVisible()
-
-    # Embedded recognition helpers
-    def stop_recognition(self):
-        """Signal the background recognition worker to stop."""
-        if self._recog_worker and self._recog_running:
-            self.log("Stopping recognition...")
-            try:
-                self._recog_worker._stop_request = True
-            except Exception:
-                pass
+            self.log(f"Recognition finished. Result: {result}")
 
     def _mark_current(self):
-        """User clicks 'Mark Current' to record currently recognized names in attendance."""
-        if not getattr(self, '_recog_current_names', None):
-            QMessageBox.information(self, "Mark Current", "No recognized people to mark right now.")
+        if not self._recog_current_names:
+            self.log("No faces recognized to mark.")
             return
         for nm in list(self._recog_current_names):
-            ok = attendance.mark_present(nm)
-            if ok:
+            if attendance.mark_present(nm):
                 self.log(f"Marked present: {nm}")
         self.refresh_attendance()
 
     def _display_frame(self, frame, recognized):
-        """Update QLabel with a frame (main thread)."""
+        self._recog_current_names = set(recognized)
+        if frame is None: return
+        
         try:
-            self._recog_current_names = set(recognized)
-            if frame is None:
-                return
             img = frame
             if img.ndim == 3 and img.shape[2] == 3:
                 h, w, ch = img.shape
@@ -618,81 +727,229 @@ class MainWindow(QMainWindow):
             else:
                 h, w = img.shape[:2]
                 qimg = QImage(img.data, w, h, QImage.Format.Format_Grayscale8)
+            
             pix = QPixmap.fromImage(qimg).scaled(self.lbl_camera.size(), Qt.AspectRatioMode.KeepAspectRatio)
             self.lbl_camera.setPixmap(pix)
         except Exception:
-            traceback.print_exc()
+            pass
 
-    def _recognition_loop(self, emb_matrix, names, threshold, resolution):
-        """Worker thread: capture frames, run detection & embedding, draw overlays and send frames to UI."""
-        try:
-            cap = cv2.VideoCapture(0)
-            if not cap or not cap.isOpened():
-                self.log("Cannot open camera for recognition")
-                return ""
-            if resolution:
-                try:
-                    wres, hres = tuple(map(int, resolution.split('x')))
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, wres)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, hres)
-                except Exception:
-                    pass
+    def _recognition_loop(self, emb_matrix, names, threshold):
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            raise Exception("Could not open camera")
+        
+        # Set resolution
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-            marked_set = set()
-            while True:
-                if getattr(threading.current_thread(), '_stop_request', False):
-                    break
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    break
-                boxes = face_detect.detect_faces(frame, conf_threshold=0.6)
-                current_rec = []
-                for b in boxes:
-                    try:
-                        x, y, w, h, conf = int(b[0]), int(b[1]), int(b[2]), int(b[3]), float(b[4] if len(b)>4 else 0.0)
-                    except Exception:
-                        try:
-                            x1, y1, x2, y2 = b[0], b[1], b[2], b[3]
-                            x, y, w, h = int(x1), int(y1), int(x2-x1), int(y2-y1)
-                            conf = float(b[4]) if len(b)>4 else 0.0
-                        except Exception:
-                            continue
-                    x1, y1 = max(0, x), max(0, y)
-                    x2, y2 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
-                    if x2 <= x1 or y2 <= y1:
-                        continue
-                    face = frame[y1:y2, x1:x2]
-                    emb = face_detect.get_embedding(face)
-                    label_text = "NoEmb"
-                    if emb is not None and emb_matrix.shape[0] > 0:
-                        sims = emb_matrix @ emb
-                        best_idx = int(_np.argmax(sims))
-                        best_sim = float(sims[best_idx])
+        marked_set = set()
+        
+        while True:
+            if getattr(threading.current_thread(), '_stop_request', False):
+                break
+            
+            ret, frame = cap.read()
+            if not ret: break
+
+            boxes = face_detect.detect_faces(frame, conf_threshold=0.6)
+            current_rec = []
+
+            for b in boxes:
+                x, y, w, h = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+                x1, y1 = max(0, x), max(0, y)
+                x2, y2 = min(frame.shape[1], x + w), min(frame.shape[0], y + h)
+                
+                face = frame[y1:y2, x1:x2]
+                if face.size == 0: continue
+
+                emb = face_detect.get_embedding(face)
+                label_text = "Unknown"
+                color = (0, 0, 255) # Red for unknown
+
+                if emb is not None:
+                    sims = emb_matrix @ emb
+                    best_idx = int(_np.argmax(sims))
+                    best_sim = float(sims[best_idx])
+                    
+                    if best_sim >= threshold:
                         name = names[best_idx]
-                        if best_sim >= threshold:
-                            label_text = f"{name} ({best_sim:.2f})"
-                            current_rec.append(name)
-                        else:
-                            label_text = f"Unknown ({best_sim:.2f})"
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
-                    cv2.putText(frame, label_text, (x1 + 2, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                        label_text = f"{name} ({best_sim:.2f})"
+                        current_rec.append(name)
+                        color = (0, 255, 0) # Green for known
 
-                try:
-                    _INVOKER.call.emit(self._display_frame, (frame.copy(), current_rec))
-                except Exception:
-                    pass
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, label_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                # brief wait so loop yields
-                cv2.waitKey(1)
+            # Send to UI
+            _INVOKER.call.emit(self._display_frame, (frame.copy(), current_rec))
+            cv2.waitKey(1)
 
-            cap.release()
-            return ",".join(sorted(set(marked_set)))
-        except Exception:
-            traceback.print_exc()
-            return ""
+        cap.release()
+        return list(marked_set)
+
+
+class AttendancePage(QWidget):
+    def __init__(self, log_callback):
+        super().__init__()
+        self.log_callback = log_callback
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setSpacing(20)
+
+        title = QLabel("Attendance Records")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title)
+
+        # List
+        self.lst_att = QListWidget()
+        layout.addWidget(self.lst_att, 2)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh List")
+        btn_refresh.clicked.connect(self.refresh_list)
+        btn_clear = QPushButton("Clear Today's Data")
+        btn_clear.clicked.connect(self.clear_data)
+        btn_clear.setStyleSheet("background-color: #d9534f;") # Red warning color
+        
+        btn_layout.addWidget(btn_refresh)
+        btn_layout.addWidget(btn_clear)
+        layout.addLayout(btn_layout)
+
+        # Logs
+        layout.addWidget(QLabel("System Logs:"))
+        self.txt_logs = QTextEdit()
+        self.txt_logs.setReadOnly(True)
+        layout.addWidget(self.txt_logs, 1)
+
+        self.refresh_list()
+
+    def refresh_list(self):
+        self.lst_att.clear()
+        names = attendance.get_marked()
+        for n in names:
+            self.lst_att.addItem(n)
+    
+    def clear_data(self):
+        if QMessageBox.question(self, "Confirm", "Clear all attendance for today?") == QMessageBox.StandardButton.Yes:
+            attendance.clear_today()
+            self.refresh_list()
+            self.log("Attendance cleared.")
+
+    def log(self, msg):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.txt_logs.append(f"[{ts}] {msg}")
+        self.txt_logs.ensureCursorVisible()
+
+
+# -------------------------------------------------------------------------
+# MAIN WINDOW
+# -------------------------------------------------------------------------
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Automated Attendance System")
+        self.resize(1100, 750)
+        
+        # Central Widget
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Sidebar
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(220)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(0, 20, 0, 20)
+        sidebar_layout.setSpacing(5)
+
+        # Sidebar Title
+        lbl_title = QLabel("Attendance\nSystem")
+        lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff; padding-bottom: 20px;")
+        sidebar_layout.addWidget(lbl_title)
+
+        # Sidebar Buttons
+        self.btn_ds = self._create_sidebar_btn("Dataset Creation")
+        self.btn_train = self._create_sidebar_btn("Train Model")
+        self.btn_recog = self._create_sidebar_btn("Recognition")
+        self.btn_att = self._create_sidebar_btn("Attendance & Logs")
+        
+        sidebar_layout.addWidget(self.btn_ds)
+        sidebar_layout.addWidget(self.btn_train)
+        sidebar_layout.addWidget(self.btn_recog)
+        sidebar_layout.addWidget(self.btn_att)
+        sidebar_layout.addStretch()
+        
+        # Footer in sidebar
+        lbl_ver = QLabel("v2.0 Pro")
+        lbl_ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_ver.setStyleSheet("color: #666; font-size: 12px;")
+        sidebar_layout.addWidget(lbl_ver)
+
+        main_layout.addWidget(self.sidebar)
+
+        # Content Area
+        self.stack = QStackedWidget()
+        main_layout.addWidget(self.stack)
+
+        # Initialize Pages
+        self.page_att = AttendancePage(self.log_message) # Init first to receive logs
+        self.page_ds = DatasetPage(self.log_message)
+        self.page_train = TrainPage(self.log_message)
+        self.page_recog = RecognitionPage(self.log_message, self.page_att.refresh_list)
+
+        self.stack.addWidget(self.page_ds)    # Index 0
+        self.stack.addWidget(self.page_train) # Index 1
+        self.stack.addWidget(self.page_recog) # Index 2
+        self.stack.addWidget(self.page_att)   # Index 3
+
+        # Connect Buttons
+        self.btn_ds.clicked.connect(lambda: self.switch_page(0, self.btn_ds))
+        self.btn_train.clicked.connect(lambda: self.switch_page(1, self.btn_train))
+        self.btn_recog.clicked.connect(lambda: self.switch_page(2, self.btn_recog))
+        self.btn_att.clicked.connect(lambda: self.switch_page(3, self.btn_att))
+
+        # Default Page
+        self.btn_recog.click()
+
+    def _create_sidebar_btn(self, text):
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setAutoExclusive(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        # We use setProperty to style specific buttons if needed, 
+        # but here we rely on the class selector in QSS: QPushButton[class="SidebarBtn"]
+        btn.setProperty("class", "SidebarBtn") 
+        return btn
+
+    def switch_page(self, index, btn_sender):
+        self.stack.setCurrentIndex(index)
+        # Ensure button is checked (handled by AutoExclusive, but good to be explicit if needed)
+        btn_sender.setChecked(True)
+
+    def log_message(self, msg):
+        # Forward logs to the attendance page log viewer
+        self.page_att.log(msg)
+
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_STYLESHEET)
+    
+    # Fix for high DPI displays
+    if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
+        app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps'):
+        app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+
     w = MainWindow()
     w.show()
     sys.exit(app.exec())

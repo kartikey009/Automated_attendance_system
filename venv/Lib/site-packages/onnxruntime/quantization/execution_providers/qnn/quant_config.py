@@ -21,6 +21,7 @@ from .mixed_precision_overrides_utils import MixedPrecisionTensorQuantOverridesF
 
 Q16_TYPES = {QuantType.QInt16, QuantType.QUInt16}
 Q8_TYPES = {QuantType.QInt8, QuantType.QUInt8}
+Q4_TYPES = {QuantType.QInt4, QuantType.QUInt4}
 OP_TYPES_TO_EXCLUDE = {"Cast"}
 MODEL_SIZE_THRESHOLD = 2147483648  # Quant model should use external data if >= 2GB
 
@@ -50,6 +51,11 @@ def get_qnn_qdq_config(
     add_qtype_converts: bool = True,
     activation_symmetric: bool = False,
     weight_symmetric: bool | None = None,
+    keep_removable_activations: bool = False,
+    stride: int | None = None,
+    calibration_providers: list[str] | None = None,
+    op_types_to_quantize: list[str] | None = None,
+    nodes_to_exclude: list[str] | None = None,
 ) -> StaticQuantConfig:
     """
     Returns a static quantization configuration suitable for running QDQ models on QNN EP.
@@ -109,6 +115,16 @@ def get_qnn_qdq_config(
             the zero-point values are 128 and 32,768, respectively.
         weight_symmetric: True if weights should be quantized symmetrically (i.e., rmax == -rmin) by default.
             Defaults to None. If set to None, weight_symmetric is assumed true if the weight_type is a signed int.
+        keep_removable_activations: Defaults to false. If true, "removable" activations (e.g., Clip or Relu) will not
+                        be removed, and will be explicitly represented in the QDQ model. If false, these activations
+                        are automatically removed if activations are asymmetrically quantized. Keeping these activations
+                        is necessary if optimizations or EP transformations will later remove
+                        QuantizeLinear/DequantizeLinear operators from the model.
+        calibration_providers: Execution providers to run the session during calibration. Default is None which uses
+            [ "CPUExecutionProvider" ].
+        op_types_to_quantize: If set to None, all operator types will be quantized except for OP_TYPES_TO_EXCLUDE
+        nodes_to_exclude: List of nodes names to exclude from quantization. The nodes in this list will be excluded from
+            quantization when it is not None.
 
     Returns:
         A StaticQuantConfig object
@@ -153,24 +169,34 @@ def get_qnn_qdq_config(
         name_to_initializer,
     )
 
+    op_types_to_quantize_set = set(op_types_to_quantize) if op_types_to_quantize else None
+    nodes_to_exclude_set = set(nodes_to_exclude) if nodes_to_exclude else None
+
     for node in model.graph.node:
+        if op_types_to_quantize_set and node.op_type not in op_types_to_quantize_set:
+            continue
+        if nodes_to_exclude_set and node.name in nodes_to_exclude_set:
+            continue
         op_types.add(node.op_type)
         qnn_compat.process_node(node)
 
     extra_options = {
         "MinimumRealRange": 0.0001,
         "DedicatedQDQPair": False,  # Let ORT optimizer duplicate DQ nodes
+        "QDQKeepRemovableActivations": keep_removable_activations,
         "TensorQuantOverrides": overrides_helper.get_dict(),
         "ActivationSymmetric": activation_symmetric,
         "WeightSymmetric": weight_symmetric,
+        "CalibStridedMinMax": stride,
     }
 
     # ONNX opset < 21 does not support 16-bit quantization, so must use 'com.microsoft' domain
-    # on Q/DQ operators if using 16-bit quantization.
+    # on Q/DQ operators if using 16-bit or 4-bit quantization.
     onnx_opset = next(x for x in model.opset_import if x.domain == "" or x.domain == "ai.onnx")
     if onnx_opset.version < 21:
-        overrides_have_int16 = any(t in Q16_TYPES for t in overrides_helper.get_quant_types())
-        if activation_type in Q16_TYPES or weight_type in Q16_TYPES or overrides_have_int16:
+        opset21_types = Q16_TYPES.union(Q4_TYPES)
+        overrides_have_opset21_types = any(t in opset21_types for t in overrides_helper.get_quant_types())
+        if activation_type in opset21_types or weight_type in opset21_types or overrides_have_opset21_types:
             extra_options["UseQDQContribOps"] = True
 
     return StaticQuantConfig(
@@ -178,9 +204,13 @@ def get_qnn_qdq_config(
         calibrate_method=calibrate_method,
         activation_type=activation_type,
         weight_type=weight_type,
-        op_types_to_quantize=list(op_types.difference(OP_TYPES_TO_EXCLUDE)),
+        op_types_to_quantize=(
+            op_types_to_quantize if op_types_to_quantize else list(op_types.difference(OP_TYPES_TO_EXCLUDE))
+        ),
+        nodes_to_exclude=nodes_to_exclude,
         per_channel=per_channel,
         use_external_data_format=(model_has_external_data or model.ByteSize() >= MODEL_SIZE_THRESHOLD),
+        calibration_providers=calibration_providers,
         extra_options=extra_options,
     )
 

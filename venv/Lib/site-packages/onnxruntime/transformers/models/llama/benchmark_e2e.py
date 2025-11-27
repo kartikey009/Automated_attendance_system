@@ -69,20 +69,36 @@ def get_model(args: argparse.Namespace):
                 cache_dir=args.cache_dir,
                 torch_dtype=args.torch_dtype,
                 use_auth_token=args.auth,
+                trust_remote_code=args.trust,
                 use_cache=True,
                 attn_implementation="flash_attention_2",
                 quantization_config=bnb_config,
                 max_memory={args.device_id: "80GB"},
             )
         else:
-            model = AutoModelForCausalLM.from_pretrained(
-                args.hf_dir_path if args.hf_dir_path != "" else args.model_name,
-                cache_dir=args.cache_dir,
-                torch_dtype=args.torch_dtype,
-                use_auth_token=args.auth,
-                use_cache=True,
-                attn_implementation=("flash_attention_2" if args.device == "cuda" else "sdpa"),
-            ).to(args.target_device)
+            try:
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.hf_dir_path if args.hf_dir_path != "" else args.model_name,
+                    cache_dir=args.cache_dir,
+                    torch_dtype=args.torch_dtype,
+                    use_auth_token=args.auth,
+                    trust_remote_code=args.trust,
+                    use_cache=True,
+                    attn_implementation=("flash_attention_2" if args.device == "cuda" else "sdpa"),
+                ).to(args.target_device)
+            except Exception as e:
+                # When flash_attention or sdpa doesn't support a model, it throws an exception.
+                # Rather than stopping a process, run as eager mode.
+                print("Try to load a model using eager mode: ", e)
+                model = AutoModelForCausalLM.from_pretrained(
+                    args.hf_dir_path if args.hf_dir_path != "" else args.model_name,
+                    cache_dir=args.cache_dir,
+                    torch_dtype=args.torch_dtype,
+                    use_auth_token=args.auth,
+                    trust_remote_code=args.trust,
+                    use_cache=True,
+                    attn_implementation="eager",
+                ).to(args.target_device)
 
         model.eval()
 
@@ -199,6 +215,14 @@ def get_args():
     )
 
     parser.add_argument(
+        "-t",
+        "--trust",
+        default=False,
+        action="store_true",
+        help="Whether or not to allow for custom models defined on the Hugging Face Hub in their own modeling files",
+    )
+
+    parser.add_argument(
         "-c",
         "--cache-dir",
         type=str,
@@ -235,14 +259,16 @@ def get_args():
         help="Use when GroupQueryAttention (GQA) is in ONNX model",
     )
 
-    parser.add_argument(
-        "--anomaly-filtering",
-        default=False,
-        action="store_true",
-        help="Use this flag to filter anomaly accelerator times for tokens generated. \
+    (
+        parser.add_argument(
+            "--anomaly-filtering",
+            default=False,
+            action="store_true",
+            help="Use this flag to filter anomaly accelerator times for tokens generated. \
               This may give more accurate latency and throughput metrics for tokens generated. \
               Wall-clock metrics are still reported with anomaly times though.",
-    ),
+        ),
+    )
 
     parser.add_argument(
         "-b",
@@ -320,6 +346,8 @@ def get_args():
     setattr(args, "engine", engine)  # noqa: B010
     setattr(args, "use_fp16", args.precision == "fp16")  # noqa: B010
 
+    args.use_buffer_share = args.use_buffer_share and engine == "ort"
+
     return args
 
 
@@ -338,11 +366,13 @@ def main():
         args.hf_dir_path if args.hf_dir_path != "" else args.model_name,
         cache_dir=args.cache_dir,
         use_auth_token=args.auth,
+        trust_remote_code=args.trust,
     )
     tokenizer = AutoTokenizer.from_pretrained(
         args.hf_dir_path if args.hf_dir_path != "" else args.model_name,
         cache_dir=args.cache_dir,
         use_auth_token=args.auth,
+        trust_remote_code=args.trust,
     )
     model = get_model(args)
 
@@ -438,11 +468,8 @@ def main():
                 inputs["attention_mask"] = torch.cat(
                     [inputs["attention_mask"], (~has_eos).to(torch.int64).reshape(batch_size, 1)], 1
                 )
-                inputs["position_ids"] = (
-                    None
-                    if "position_ids" not in inputs
-                    else torch.max(inputs["position_ids"], dim=1)[0].reshape(batch_size, 1) + 1
-                )
+                if "position_ids" in inputs:
+                    inputs["position_ids"] = torch.max(inputs["position_ids"], dim=1)[0].reshape(batch_size, 1) + 1
 
                 # Set logits to zeros for next inference run and re-use memory buffer
                 if outputs["logits"].shape[1] != 1:
@@ -570,8 +597,8 @@ def main():
             )
             all_csv_metrics.append(csv_metrics)
 
-        except:  # noqa: E722
-            logger.info(f"Could not benchmark at batch size = {batch_size}, prompt length = {prompt_length}")
+        except Exception as e:
+            logger.info(f"Could not benchmark at batch size = {batch_size}, prompt length = {prompt_length} - {e}")
 
     filename = f"benchmark_{args.engine}_e2e_{datetime.datetime.now():%Y-%m-%d_%H:%M:%S}.csv"
     save_results(all_csv_metrics, filename, args.generation_length)

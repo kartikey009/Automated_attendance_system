@@ -20,7 +20,7 @@ struct TORCH_API TensorGeometry {
         strides_(sizes.size()),
         has_symbolic_sizes_strides_(
             !c10::asIntArrayRefSlowOpt(sizes).has_value()) {
-    int64_t dim = sizes.size();
+    int64_t dim = static_cast<int64_t>(sizes.size());
     c10::SymInt expected_stride = 1;
     for (int64_t i = dim - 1; i >= 0; i--) {
       strides_[i] = expected_stride;
@@ -37,11 +37,21 @@ struct TORCH_API TensorGeometry {
         has_symbolic_sizes_strides_(
             t.unsafeGetTensorImpl()->has_symbolic_sizes_strides()) {}
 
+  explicit TensorGeometry(
+      std::vector<at::SymInt> sizes,
+      std::vector<at::SymInt> strides,
+      at::SymInt storage_offset)
+      : sizes_(std::move(sizes)),
+        strides_(std::move(strides)),
+        storage_offset_(std::move(storage_offset)) {
+    recompute();
+  }
+
   // true if the tensor is contiguous
   bool is_contiguous() const;
 
   int64_t dim() const {
-    return sizes_.size();
+    return static_cast<int64_t>(sizes_.size());
   }
 
   int64_t size(int64_t dim) const {
